@@ -32,8 +32,8 @@ void log_print(uint8_t level, const char *fmt, ...) {
 
 class TestPixelblaze : public pixelblaze_cpp::Pixelblaze {
 public:
-    explicit TestPixelblaze(pixelblaze_cpp::Program& program, std::size_t pixel_count = 16)
-        : Pixelblaze(program, pixel_count), colors_(pixel_count) {}
+    explicit TestPixelblaze(std::size_t pixel_count = 16)
+        : Pixelblaze(pixel_count), colors_(pixel_count) {}
 
     void setColor(uint16_t index, const pixelblaze_cpp::WS2812Color& color) override {
         if (index < colors_.size()) {
@@ -116,7 +116,8 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        TestPixelblaze vm(program, pixelCount);
+        TestPixelblaze vm(pixelCount);
+        vm.begin(program);
         
         if (outputFile.empty()) {
             std::string scriptBase = getFileNameWithoutExt(scriptPath);

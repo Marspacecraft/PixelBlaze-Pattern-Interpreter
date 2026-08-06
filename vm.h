@@ -54,6 +54,8 @@ private:
     
     void callFunction(const std::string& name, const std::vector<double>& args = {});
 
+    void deinit();
+
 #if ENABLE_DUMP
     void dump_vars() const;
     void dump_functions() const;

@@ -11,8 +11,10 @@ class Pixelblaze : public PixelblazeRuntime {
 public:
     ~Pixelblaze() override = default;
 
-    explicit Pixelblaze(Program& program, std::size_t pixel_count = 16)
-        : PixelblazeRuntime(pixel_count) { loadProgram(program); }
+    explicit Pixelblaze(std::size_t pixel_count = 16)
+        : PixelblazeRuntime(pixel_count) { }
+    
+    bool begin(const Program& program){ VM::loadProgram(program); return true; }
 
     void setGridSize(std::size_t w, std::size_t h, std::size_t d = 1) override { VM::setGridSize(w, h, d); }
 

@@ -76,11 +76,38 @@ double mix_double(double a, double b, double t) {
 VM::VM(std::size_t count) : ip_(0), has_color_(false), time_ms_(0.0), delta_ms_(0.0),
            pixel_index_(0), pixel_count_(static_cast<double>(count)) {}
 
+void VM::deinit() {
+ 
+    code_.clear();
+    ip_ = 0;
+    stack_.clear();
+    return_stack_.clear();
+    call_frames_.clear();
+
+    globals_.clear();
+    locals_.clear();
+    functions_.clear();
+
+    before_render_name_.clear();
+    render_name_.clear();
+    current_color_ = LedColor{0.0, 0.0, 0.0};
+    has_color_ = false;
+    time_ms_ = 0.0;
+    delta_ms_ = 0.0;
+    pixel_index_ = 0;
+
+    arrays_.clear();
+    string_consts_.clear();
+    string_id_counter_ = 0.0;
+
+}
+
 void VM::loadProgram(const Program& program) {
     LOG_INFO("VM::loadProgram: main_code=%zu instructions, functions=%zu",
              program.main_code.size(), program.functions.size());
+    
+    deinit();
 
-    functions_.clear();
     for (const auto& kv : program.functions) {
         functions_[kv.first] = kv.second;
         LOG_INFO("  Registered function '%s' (%zu instructions)",
@@ -94,8 +121,6 @@ void VM::loadProgram(const Program& program) {
     if (!render_name_.empty())
         LOG_INFO("  Render: '%s'", render_name_.c_str());
 
-    globals_.clear();
-
     for (const auto& instr : program.main_code) {
         if (instr.op == Op::DeclVar) {
             globals_[instr.name] = 0.0;
@@ -103,21 +128,10 @@ void VM::loadProgram(const Program& program) {
     }
     code_ = program.main_code;
     ip_ = 0;
-    stack_.clear();
-    return_stack_.clear();
-    locals_.clear();
-    call_frames_.clear();
-    time_ms_ = 0.0;
-    delta_ms_ = 0.0;
-    pixel_index_ = 0;
-    has_color_ = false;
-    current_color_ = LedColor{};
-
     for (const auto& kv : exports_) {
         globals_[kv.first] = kv.second;
     }
 
-    string_consts_.clear();
     string_id_counter_ = 0.0;
     for (auto& instr : code_) {
         if (instr.op == Op::PushString) {
