@@ -38,7 +38,7 @@ protected:
     }
 
     void onScriptLog(const std::string& msg) override {
-        LOG_SCRIPT("%s", msg.c_str());
+        PBZ_SCRIPT("%s", msg.c_str());
     }
 
 private:

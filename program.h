@@ -1,12 +1,17 @@
 #pragma once
 
+#include <functional>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "ffi.h"
 
 namespace pixelblaze_cpp {
+
+class PixelblazeCompiler;
+
 struct LedColor {
     double r = 0.0;
     double g = 0.0;
@@ -35,6 +40,7 @@ enum class Op {
     Jump,
     JumpIfFalse,
     Call,
+    CallNative,
     Return,
     Break,
     Continue,
@@ -90,6 +96,19 @@ enum class Op {
 };
 const char* opToString(Op op);
 
+enum class NativeValueType { Double, String };
+
+struct NativeValue {
+    NativeValueType type;
+    double dval;
+    std::string sval;
+
+    NativeValue() : type(NativeValueType::Double), dval(0.0) {}
+    NativeValue(double v) : type(NativeValueType::Double), dval(v) {}
+    NativeValue(const std::string& v) : type(NativeValueType::String), dval(0.0), sval(v) {}
+    NativeValue(const char* v) : type(NativeValueType::String), dval(0.0), sval(v ? v : "") {}
+};
+
 struct Instruction {
     Op op;
     double value;
@@ -119,6 +138,9 @@ struct Instruction {
     }
     static Instruction call(const std::string& n) {
         Instruction i; i.op = Op::Call; i.name = n; return i;
+    }
+    static Instruction callNative(const std::string& n, int argc) {
+        Instruction i; i.op = Op::CallNative; i.name = n; i.index = argc; return i;
     }
     static Instruction ret() {
         Instruction i; i.op = Op::Return; return i;
@@ -157,14 +179,32 @@ struct Instruction {
 #if ENABLE_DUMP
     void dump() const
     { 
-        LOG_DEBUG("=== Pixelblaze Instruction Dump ===");
-        LOG_DEBUG("%s", opToString(op));
-        if (op == Op::Push) LOG_DEBUG("value: %f", value);
-        if (op == Op::Jump || op == Op::JumpIfFalse) LOG_DEBUG("offset: %d", offset);
-        if (!name.empty()) LOG_DEBUG("name: %s", name.c_str());
-        LOG_DEBUG("index: %d", index);
+        PBZ_DEBUG("=== Pixelblaze Instruction Dump ===");
+        PBZ_DEBUG("%s", opToString(op));
+        if (op == Op::Push) PBZ_DEBUG("value: %f", value);
+        if (op == Op::Jump || op == Op::JumpIfFalse) PBZ_DEBUG("offset: %d", offset);
+        if (!name.empty()) PBZ_DEBUG("name: %s", name.c_str());
+        PBZ_DEBUG("index: %d", index);
     }
 #endif
+};
+
+using NativeFunc = std::function<NativeValue(const std::vector<NativeValue>& args)>;
+using IdentHandler = std::function<void(std::vector<Instruction>& out)>;
+using BuiltinHandler = std::function<void(
+    const std::vector<std::string>& args,
+    std::vector<Instruction>& out,
+    PixelblazeCompiler& compiler
+)>;
+
+struct NativeFunctionInfo {
+    NativeFunc func;
+    std::vector<NativeValueType> paramTypes;
+    bool hasTypeInfo;
+};
+
+struct NativeVariableInfo {
+    NativeValue value;
 };
 
 struct FunctionDef {

@@ -14,18 +14,6 @@
 
 namespace pixelblaze_cpp {
 
-std::unordered_map<std::string, PixelblazeCompiler::IdentHandler> PixelblazeCompiler::ident_registry_;
-std::unordered_map<std::string, PixelblazeCompiler::BuiltinHandler> PixelblazeCompiler::builtin_registry_;
-
-namespace {
-struct BuiltinRegistrar {
-    BuiltinRegistrar() {
-        PixelblazeCompiler::initBuiltins();
-    }
-};
-static BuiltinRegistrar s_registrar;
-} // anonymous namespace
-
 void PixelblazeCompiler::compileArgs(const std::vector<std::string>& args,
                                       std::vector<Instruction>& out,
                                       PixelblazeCompiler& compiler) {
@@ -409,15 +397,15 @@ Program PixelblazeCompiler::compile(const std::string& source) const {
     std::string src = source;
     stripComments(src);
 
-    LOG_INFO("Compile start: source length=%zu chars", src.size());
+    PBZ_INFO("Compile start: source length=%zu chars", src.size());
 
     compileTopLevel(std::move(src), program);
 
     if (parse_ok_) {
-        LOG_INFO("Compile OK: main_code=%zu instructions, functions=%zu",
+        PBZ_INFO("Compile OK: main_code=%zu instructions, functions=%zu",
                  program.main_code.size(), program.functions.size());
     } else {
-        LOG_ERROR("Compile failed: parse error in source");
+        PBZ_ERROR("Compile failed: parse error in source");
     }
 
 #if ENABLE_DUMP
@@ -442,7 +430,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
             std::size_t name_start = p;
             while (p < src.size() && isIdentChar(src[p])) ++p;
             if (name_start == p) {
-                LOG_ERROR("Parse error: expected function name at pos %zu", name_start);
+                PBZ_ERROR("Parse error: expected function name at pos %zu", name_start);
                 parseError(); break;
             }
             std::string name = src.substr(name_start, p - name_start);
@@ -452,7 +440,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
             if (p < src.size() && src[p] == '(') {
                 std::string paren_body = findMatchingParen(src, p);
                 if (paren_body.empty()) {
-                    LOG_ERROR("Parse error: unmatched '(' in function '%s'", name.c_str());
+                    PBZ_ERROR("Parse error: unmatched '(' in function '%s'", name.c_str());
                     parseError(); break;
                 }
                 p += paren_body.size() + 2;
@@ -463,7 +451,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
             if (p < src.size() && src[p] == '{') {
                 std::string body = findMatchingBrace(src, p);
                 if (body.empty()) {
-                    LOG_ERROR("Parse error: unmatched '{' in function '%s'", name.c_str());
+                    PBZ_ERROR("Parse error: unmatched '{' in function '%s'", name.c_str());
                     parseError(); break;
                 }
                 p += body.size() + 2;
@@ -476,7 +464,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 fn.code.push_back(Instruction::ret());
                 program.functions[name] = fn;
 
-                LOG_INFO("Function '%s' compiled: %zu instructions, %zu params",
+                PBZ_INFO("Function '%s' compiled: %zu instructions, %zu params",
                          name.c_str(), fn.code.size(), params.size());
 
                 std::string lower_name = toLower(name);
@@ -490,7 +478,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
 
                 src.erase(0, p);
             } else {
-                LOG_ERROR("Parse error: expected '{' after function '%s'", name.c_str());
+                PBZ_ERROR("Parse error: expected '{' after function '%s'", name.c_str());
                 parseError();
                 break;
             }
@@ -507,7 +495,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 std::size_t name_start = fn_p;
                 while (fn_p < src.size() && isIdentChar(src[fn_p])) ++fn_p;
                 if (name_start == fn_p) {
-                    LOG_ERROR("Parse error: expected function name in export at pos %zu", name_start);
+                    PBZ_ERROR("Parse error: expected function name in export at pos %zu", name_start);
                     parseError(); break;
                 }
                 std::string fn_name = src.substr(name_start, fn_p - name_start);
@@ -517,7 +505,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 if (fn_p < src.size() && src[fn_p] == '(') {
                     std::string paren_body = findMatchingParen(src, fn_p);
                     if (paren_body.empty()) {
-                        LOG_ERROR("Parse error: unmatched '(' in export function '%s'", fn_name.c_str());
+                        PBZ_ERROR("Parse error: unmatched '(' in export function '%s'", fn_name.c_str());
                         parseError(); break;
                     }
                     fn_p += paren_body.size() + 2;
@@ -528,7 +516,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 if (fn_p < src.size() && src[fn_p] == '{') {
                     std::string body = findMatchingBrace(src, fn_p);
                     if (body.empty()) {
-                        LOG_ERROR("Parse error: unmatched '{' in export function '%s'", fn_name.c_str());
+                        PBZ_ERROR("Parse error: unmatched '{' in export function '%s'", fn_name.c_str());
                         parseError(); break;
                     }
                     fn_p += body.size() + 2;
@@ -541,7 +529,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                     fn.code.push_back(Instruction::ret());
                     program.functions[fn_name] = fn;
 
-                    LOG_INFO("Export function '%s' compiled: %zu instructions", fn_name.c_str(), fn.code.size());
+                    PBZ_INFO("Export function '%s' compiled: %zu instructions", fn_name.c_str(), fn.code.size());
 
                     std::string lower_fn = toLower(fn_name);
                     if (lower_fn == "beforerender") {
@@ -555,7 +543,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                     program.export_functions.push_back(fn_name);
                     src.erase(0, fn_p);
                 } else {
-                    LOG_ERROR("Parse error: expected '{' after export function '%s'", fn_name.c_str());
+                    PBZ_ERROR("Parse error: expected '{' after export function '%s'", fn_name.c_str());
                     parseError();
                     break;
                 }
@@ -618,7 +606,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 }
 
                 for (const auto& vn : var_names) {
-                    LOG_INFO("Export var '%s'", vn.c_str());
+                    PBZ_INFO("Export var '%s'", vn.c_str());
                     program.export_vars.push_back(vn);
                     program.main_code.push_back(Instruction::declVar(vn));
                 }
@@ -763,7 +751,7 @@ void PixelblazeCompiler::compileStatement(std::string& stmt, std::vector<Instruc
 
     if (lower == "break") {
         if (loop_depth <= 0) {
-            LOG_ERROR("Parse error: 'break' outside loop");
+            PBZ_ERROR("Parse error: 'break' outside loop");
             parseError(); return;
         }
         out.push_back(Instruction::makeOp(Op::Break));
@@ -771,7 +759,7 @@ void PixelblazeCompiler::compileStatement(std::string& stmt, std::vector<Instruc
     }
     if (lower == "continue") {
         if (loop_depth <= 0) {
-            LOG_ERROR("Parse error: 'continue' outside loop");
+            PBZ_ERROR("Parse error: 'continue' outside loop");
             parseError(); return;
         }
         out.push_back(Instruction::makeOp(Op::Continue));
@@ -1137,9 +1125,14 @@ void PixelblazeCompiler::compileExpr(const std::string& expr, std::vector<Instru
 }
 
 void PixelblazeCompiler::compileIdentExpr(const std::string& ident, std::vector<Instruction>& out) const {
-    auto it = ident_registry_.find(ident);
-    if (it != ident_registry_.end()) {
+    auto& reg = NativeFunctionRegistry::instance();
+    auto it = reg.idents().find(ident);
+    if (it != reg.idents().end()) {
         it->second(out);
+        return;
+    }
+    if (reg.hasDynamicVariable(ident)) {
+        out.push_back(Instruction::getVar(ident));
         return;
     }
     out.push_back(Instruction::getVar(ident));
@@ -1147,12 +1140,79 @@ void PixelblazeCompiler::compileIdentExpr(const std::string& ident, std::vector<
 
 void PixelblazeCompiler::emitBuiltin(const std::string& name, const std::vector<std::string>& args,
                                      std::vector<Instruction>& out) const {
-    auto it = builtin_registry_.find(name);
-    if (it != builtin_registry_.end()) {
+    auto& reg = NativeFunctionRegistry::instance();
+    auto it = reg.builtins().find(name);
+    if (it != reg.builtins().end()) {
         it->second(args, out, *const_cast<PixelblazeCompiler*>(this));
         return;
     }
+    if (reg.hasFunction(name)) {
+        const auto* info = reg.getFunctionInfo(name);
+        if (info && info->hasTypeInfo) {
+            if (args.size() != info->paramTypes.size()) {
+                parseError();
+                return;
+            }
+            for (std::size_t i = 0; i < args.size() && i < info->paramTypes.size(); ++i) {
+                const std::string& arg = trim(args[i]);
+                NativeValueType expected = info->paramTypes[i];
+                bool is_str_lit = (!arg.empty() && (arg.front() == '"' || arg.front() == '\''));
+                bool is_num_lit = false;
+                if (!arg.empty() && !is_str_lit) {
+                    char c = arg[0];
+                    is_num_lit = std::isdigit(static_cast<unsigned char>(c)) ||
+                                 (c == '.' && arg.size() > 1 &&
+                                  std::isdigit(static_cast<unsigned char>(arg[1])));
+                }
+                if (is_str_lit && expected != NativeValueType::String) {
+                    parseError();
+                    return;
+                }
+                if (is_num_lit && expected != NativeValueType::Double) {
+                    parseError();
+                    return;
+                }
+            }
+        }
+        compileArgs(args, out, *const_cast<PixelblazeCompiler*>(this));
+        out.push_back(Instruction::callNative(name, static_cast<int>(args.size())));
+        return;
+    }
+    if (reg.hasDynamicFunction(name)) {
+        const auto* info = reg.getDynamicFunctionInfo(name);
+        if (info && info->hasTypeInfo) {
+            if (args.size() != info->paramTypes.size()) {
+                parseError();
+                return;
+            }
+            for (std::size_t i = 0; i < args.size() && i < info->paramTypes.size(); ++i) {
+                const std::string& arg = trim(args[i]);
+                NativeValueType expected = info->paramTypes[i];
+                bool is_str_lit = (!arg.empty() && (arg.front() == '"' || arg.front() == '\''));
+                bool is_num_lit = false;
+                if (!arg.empty() && !is_str_lit) {
+                    char c = arg[0];
+                    is_num_lit = std::isdigit(static_cast<unsigned char>(c)) ||
+                                 (c == '.' && arg.size() > 1 &&
+                                  std::isdigit(static_cast<unsigned char>(arg[1])));
+                }
+                if (is_str_lit && expected != NativeValueType::String) {
+                    parseError();
+                    return;
+                }
+                if (is_num_lit && expected != NativeValueType::Double) {
+                    parseError();
+                    return;
+                }
+            }
+        }
+        compileArgs(args, out, *const_cast<PixelblazeCompiler*>(this));
+        out.push_back(Instruction::call(name));
+        out.back().index = static_cast<int>(args.size());
+        return;
+    }
     out.push_back(Instruction::call(name));
+    out.back().index = static_cast<int>(args.size());
 }
 
 std::size_t PixelblazeCompiler::parsePrimary(const std::string& s, std::size_t pos, std::vector<Instruction>& out) const {
@@ -1806,11 +1866,113 @@ bool PixelblazeCompiler::compileAssignExpr(const std::string& expr, std::vector<
     }
 }
 
-void PixelblazeCompiler::registerIdent(const std::string& name, IdentHandler handler) {
+NativeFunctionRegistry::NativeFunctionRegistry() {
+    initBuiltins();
+}
+
+NativeFunctionRegistry& NativeFunctionRegistry::instance() {
+    static NativeFunctionRegistry inst;
+    return inst;
+}
+
+void NativeFunctionRegistry::registerFunction(const std::string& name, NativeFunc func,
+                                               std::initializer_list<NativeValueType> types) {
+    NativeFunctionInfo info;
+    info.func = std::move(func);
+    info.paramTypes = types;
+    info.hasTypeInfo = types.size() > 0;
+    functions_[name] = std::move(info);
+}
+
+bool NativeFunctionRegistry::hasFunction(const std::string& name) const {
+    return functions_.find(name) != functions_.end();
+}
+
+NativeValue NativeFunctionRegistry::callFunction(const std::string& name,
+                                            const std::vector<NativeValue>& args) {
+    auto it = functions_.find(name);
+    if (it != functions_.end()) {
+        return it->second.func(args);
+    }
+    return NativeValue(0.0);
+}
+
+const NativeFunctionInfo*
+NativeFunctionRegistry::getFunctionInfo(const std::string& name) const {
+    auto it = functions_.find(name);
+    if (it != functions_.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
+void NativeFunctionRegistry::registerVariable(const std::string& name, NativeValue value) {
+    NativeVariableInfo info;
+    info.value = std::move(value);
+    variables_[name] = std::move(info);
+}
+
+bool NativeFunctionRegistry::hasVariable(const std::string& name) const {
+    return variables_.find(name) != variables_.end();
+}
+
+NativeValue NativeFunctionRegistry::getVariableValue(const std::string& name) const {
+    auto it = variables_.find(name);
+    if (it != variables_.end()) {
+        return it->second.value;
+    }
+    return NativeValue(0.0);
+}
+
+void NativeFunctionRegistry::setVariableValue(const std::string& name, const NativeValue& value) {
+    auto it = variables_.find(name);
+    if (it != variables_.end()) {
+        it->second.value = value;
+    }
+}
+
+void NativeFunctionRegistry::registerDynamicFunction(const std::string& name,
+                                                     std::initializer_list<NativeValueType> types) {
+    NativeFunctionInfo info;
+    info.paramTypes = types;
+    info.hasTypeInfo = types.size() > 0;
+    dynamic_functions_[name] = std::move(info);
+}
+
+bool NativeFunctionRegistry::hasDynamicFunction(const std::string& name) const {
+    return dynamic_functions_.find(name) != dynamic_functions_.end();
+}
+
+const NativeFunctionInfo*
+NativeFunctionRegistry::getDynamicFunctionInfo(const std::string& name) const {
+    auto it = dynamic_functions_.find(name);
+    if (it != dynamic_functions_.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
+void NativeFunctionRegistry::registerDynamicVariable(const std::string& name, NativeValueType type) {
+    dynamic_variables_[name] = type;
+}
+
+bool NativeFunctionRegistry::hasDynamicVariable(const std::string& name) const {
+    return dynamic_variables_.find(name) != dynamic_variables_.end();
+}
+
+NativeValueType NativeFunctionRegistry::getDynamicVariableType(const std::string& name) const {
+    auto it = dynamic_variables_.find(name);
+    if (it != dynamic_variables_.end()) {
+        return it->second;
+    }
+    return NativeValueType::Double;
+}
+
+void NativeFunctionRegistry::registerIdent(const std::string& name, IdentHandler handler) {
     ident_registry_[name] = std::move(handler);
 }
 
-void PixelblazeCompiler::registerIdentOp(const std::string& name, Op op,
+void NativeFunctionRegistry::registerIdentOp(const std::string& name, Op op,
                                           std::initializer_list<const char*> aliases) {
     ident_registry_[name] = [op](std::vector<Instruction>& out) {
         out.push_back(Instruction::makeOp(op));
@@ -1822,16 +1984,16 @@ void PixelblazeCompiler::registerIdentOp(const std::string& name, Op op,
     }
 }
 
-void PixelblazeCompiler::registerBuiltin(const std::string& name, BuiltinHandler handler) {
+void NativeFunctionRegistry::registerBuiltin(const std::string& name, BuiltinHandler handler) {
     builtin_registry_[name] = std::move(handler);
 }
 
-void PixelblazeCompiler::registerBuiltinOp(const std::string& name, Op op,
+void NativeFunctionRegistry::registerBuiltinOp(const std::string& name, Op op,
                                             std::initializer_list<const char*> aliases) {
     auto handler = [op](const std::vector<std::string>& args,
                          std::vector<Instruction>& out,
                          PixelblazeCompiler& compiler) {
-        compileArgs(args, out, compiler);
+        PixelblazeCompiler::compileArgs(args, out, compiler);
         out.push_back(Instruction::makeOp(op));
     };
     builtin_registry_[name] = handler;
@@ -1840,15 +2002,15 @@ void PixelblazeCompiler::registerBuiltinOp(const std::string& name, Op op,
     }
 }
 
-bool PixelblazeCompiler::isBuiltin(const std::string& name) {
+bool NativeFunctionRegistry::isBuiltin(const std::string& name) const {
     return builtin_registry_.count(name) > 0;
 }
 
-bool PixelblazeCompiler::isIdent(const std::string& name) {
+bool NativeFunctionRegistry::isIdent(const std::string& name) const {
     return ident_registry_.count(name) > 0;
 }
 
-void PixelblazeCompiler::initBuiltins() {
+void NativeFunctionRegistry::initBuiltins() {
     registerIdentOp("pixelCount", Op::GetPixelCount);
     registerIdentOp("pixelIndex", Op::GetPixelIndex);
     registerIdentOp("pixelX", Op::GetPixelX);
@@ -1911,7 +2073,7 @@ void PixelblazeCompiler::initBuiltins() {
         if (args.empty()) {
             out.push_back(Instruction::makeOp(Op::Random));
         } else {
-            compileArgs(args, out, compiler);
+            PixelblazeCompiler::compileArgs(args, out, compiler);
             out.push_back(Instruction::makeOp(Op::RandomRange));
         }
     };

@@ -24,6 +24,11 @@ public:
 
     void beforeRender(double delta_ms) override { VM::beforeRender(delta_ms); }
     void renderFrame() override { PixelblazeRuntime::renderFrame(); }
+    
+    virtual double onStorageGet(const std::string& key, double def) override { return def; };
+    virtual void onStorageSet(const std::string& key, double value) override { };
+    virtual std::string onStorageGetStr(const std::string& key, const std::string& def) override { return def; };
+    virtual void onStorageSetStr(const std::string& key, const std::string& value) override { };
 
 };
 

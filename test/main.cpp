@@ -10,14 +10,14 @@
 
 namespace pixelblaze_cpp {
 
-void log_print(uint8_t level, const char *fmt, ...) {
+void pbz_log_print(uint8_t level, const char *fmt, ...) {
     const char* tag;
     switch (level) {
-        case LOG_LEVEL_DEBUG: tag = "[DBG]"; break;
-        case LOG_LEVEL_INFO:  tag = "[INF]"; break;
-        case LOG_LEVEL_WARN:  tag = "[WRN]"; break;
-        case LOG_LEVEL_ERROR: tag = "[ERR]"; break;
-        case LOG_LEVEL_SCRIPT: tag = "[SCR]"; break;
+        case PBZ_LOG_LEVEL_DEBUG: tag = "[DBG]"; break;
+        case PBZ_LOG_LEVEL_INFO:  tag = "[INF]"; break;
+        case PBZ_LOG_LEVEL_WARN:  tag = "[WRN]"; break;
+        case PBZ_LOG_LEVEL_ERROR: tag = "[ERR]"; break;
+        case PBZ_LOG_LEVEL_SCRIPT: tag = "[SCR]"; break;
         default: tag = "[UNK]"; break;
     }
     va_list args;

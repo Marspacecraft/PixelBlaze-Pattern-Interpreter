@@ -32,6 +32,7 @@ const char* opToString(Op op) {
         case Op::Jump: return "Jump";
         case Op::JumpIfFalse: return "JumpIfFalse";
         case Op::Call: return "Call";
+        case Op::CallNative: return "CallNative";
         case Op::Return: return "Return";
         case Op::Break: return "Break";
         case Op::Continue: return "Continue";
@@ -91,11 +92,11 @@ const char* opToString(Op op) {
 
 #if ENABLE_DUMP
 void FunctionDef::dump() const {
-    LOG_DEBUG("=== Pixelblaze Function Dump ===");
-    LOG_DEBUG("Function '%s' (%zu instructions, %zu params):",
+    PBZ_DEBUG("=== Pixelblaze Function Dump ===");
+    PBZ_DEBUG("Function '%s' (%zu instructions, %zu params):",
         name.c_str(), code.size(), params.size());
     
-    for (const auto& param : params) LOG_DEBUG("  Param: %s", param.c_str());
+    for (const auto& param : params) PBZ_DEBUG("  Param: %s", param.c_str());
     for (std::size_t i = 0; i < code.size(); ++i) {
         const auto& instr = code[i];
         std::string line = std::string("  [") + std::to_string(i) + "] " + opToString(instr.op);
@@ -104,40 +105,41 @@ void FunctionDef::dump() const {
         if (instr.op == Op::Jump || instr.op == Op::JumpIfFalse) {
             line += " -> " + std::to_string(static_cast<int>(i) + instr.offset);
         }
-        LOG_DEBUG("%s", line.c_str());  
+        PBZ_DEBUG("%s", line.c_str());  
     }
 }
 
 
 void Program::dump() const {
-    LOG_DEBUG("=== Pixelblaze Program Dump ===");
-    LOG_DEBUG("Main code (%zu instructions):", main_code.size());
+    PBZ_DEBUG("=== Pixelblaze Program Dump ===");
+    PBZ_DEBUG("Main code (%zu instructions):", main_code.size());
     for (std::size_t i = 0; i < main_code.size(); ++i) {
         main_code[i].dump();
     }
 
     for (const auto& pair : functions) {
-        LOG_DEBUG("Function '%s': %zu instructions, %zu params",
+        PBZ_DEBUG("Function '%s': %zu instructions, %zu params",
             pair.first.c_str(), pair.second.code.size(), pair.second.params.size());
         pair.second.dump();
     }
 
     if (!before_render_name.empty())
-        LOG_DEBUG("BeforeRender: %s", before_render_name.c_str());
+        PBZ_DEBUG("BeforeRender: %s", before_render_name.c_str());
     if (!render_name.empty())
-        LOG_DEBUG("Render: %s", render_name.c_str());
+        PBZ_DEBUG("Render: %s", render_name.c_str());
 
     if (!export_vars.empty()) {
         std::string vars;
         for (const auto& v : export_vars) vars += v + " ";
-        LOG_DEBUG("Export vars: %s", vars.c_str());
+        PBZ_DEBUG("Export vars: %s", vars.c_str());
     }
     if (!export_functions.empty()) {
         std::string funcs;
         for (const auto& f : export_functions) funcs += f + " ";
-        LOG_DEBUG("Export functions: %s", funcs.c_str());
+        PBZ_DEBUG("Export functions: %s", funcs.c_str());
     }
 
 }
 #endif
+
 }  // namespace pixelblaze_cpp

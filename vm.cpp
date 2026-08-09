@@ -103,23 +103,23 @@ void VM::deinit() {
 }
 
 void VM::loadProgram(const Program& program) {
-    LOG_INFO("VM::loadProgram: main_code=%zu instructions, functions=%zu",
+    PBZ_INFO("VM::loadProgram: main_code=%zu instructions, functions=%zu",
              program.main_code.size(), program.functions.size());
     
     deinit();
 
     for (const auto& kv : program.functions) {
         functions_[kv.first] = kv.second;
-        LOG_INFO("  Registered function '%s' (%zu instructions)",
+        PBZ_INFO("  Registered function '%s' (%zu instructions)",
                  kv.first.c_str(), kv.second.code.size());
     }
     before_render_name_ = program.before_render_name;
     render_name_ = program.render_name;
 
     if (!before_render_name_.empty())
-        LOG_INFO("  BeforeRender: '%s'", before_render_name_.c_str());
+        PBZ_INFO("  BeforeRender: '%s'", before_render_name_.c_str());
     if (!render_name_.empty())
-        LOG_INFO("  Render: '%s'", render_name_.c_str());
+        PBZ_INFO("  Render: '%s'", render_name_.c_str());
 
     for (const auto& instr : program.main_code) {
         if (instr.op == Op::DeclVar) {
@@ -164,14 +164,32 @@ void VM::setGridSize(std::size_t w, std::size_t h, std::size_t d) {
 }
 
 void VM::callFunction(const std::string& name, const std::vector<double>& args) {
+    auto& reg = NativeFunctionRegistry::instance();
     auto it = functions_.find(name);
     if (it == functions_.end()) {
-        LOG_ERROR("VM::callFunction: function '%s' not found", name.c_str());
+        if (reg.hasDynamicFunction(name)) {
+            std::vector<NativeValue> native_args;
+            native_args.reserve(args.size());
+            for (double a : args) {
+                native_args.emplace_back(a);
+            }
+            NativeValue ret = callFunctionDynamic(name, native_args);
+            if (ret.type == NativeValueType::String) {
+                double new_id = string_id_counter_;
+                string_consts_[new_id] = ret.sval;
+                ++string_id_counter_;
+                pushStack(-(new_id + 1.0));
+            } else {
+                pushStack(ret.dval);
+            }
+            return;
+        }
+        PBZ_ERROR("VM::callFunction: function '%s' not found", name.c_str());
         return;
     }
 
     if (call_frames_.size() >= 256) {
-        LOG_ERROR("VM::callFunction: call stack overflow (depth=%zu) calling '%s'",
+        PBZ_ERROR("VM::callFunction: call stack overflow (depth=%zu) calling '%s'",
                   call_frames_.size(), name.c_str());
         return;
     }
@@ -255,6 +273,9 @@ void VM::renderPixel(std::size_t pixel_index) {
 // }
 
 void VM::declVar(const std::string& name) {
+    if (NativeFunctionRegistry::instance().hasDynamicVariable(name)) {
+        return;
+    }
     if (!locals_.empty()) {
         locals_.back()[name] = 0.0;
     } else {
@@ -263,6 +284,17 @@ void VM::declVar(const std::string& name) {
 }
 
 void VM::setVar(const std::string& name, double value) {
+    auto& reg = NativeFunctionRegistry::instance();
+    if (reg.hasVariable(name)) {
+        NativeValue v(value);
+        reg.setVariableValue(name, v);
+        return;
+    }
+    if (reg.hasDynamicVariable(name)) {
+        NativeValue v(value);
+        setDynamicVarValue(name, v);
+        return;
+    }
     if (!locals_.empty()) {
         auto lit = locals_.back().find(name);
         if (lit != locals_.back().end()) {
@@ -279,12 +311,22 @@ void VM::setVar(const std::string& name, double value) {
 }
 
 double VM::getVar(const std::string& name) const {
+    auto& reg = NativeFunctionRegistry::instance();
+    if (reg.hasVariable(name)) {
+        NativeValue v = reg.getVariableValue(name);
+        return v.dval;
+    }
     if (!locals_.empty()) {
         auto it = locals_.back().find(name);
         if (it != locals_.back().end()) return it->second;
     }
     auto it = globals_.find(name);
-    return it != globals_.end() ? it->second : 0.0;
+    if (it != globals_.end()) return it->second;
+    if (reg.hasDynamicVariable(name)) {
+        NativeValue v = getDynamicVarValue(name);
+        return v.dval;
+    }
+    return 0.0;
 }
 
 void VM::pushStack(double v) {
@@ -298,23 +340,24 @@ double VM::popStack() {
     return v;
 }
 
-// void VM::setStorageValue(const std::string& key, double value) {
-//     storage_[key] = value;
-// }
+double VM::stackPop() {
+    return popStack();
+}
 
-// double VM::getStorageValue(const std::string& key) const {
-//     auto it = storage_.find(key);
-//     return it != storage_.end() ? it->second : 0.0;
-// }
+void VM::stackPush(double v) {
+    pushStack(v);
+}
 
-// void VM::setStorageStrValue(const std::string& key, const std::string& value) {
-//     storage_str_[key] = value;
-// }
+std::string VM::resolveString(double id) {
+    double actual_key = id < 0.0 ? -(id + 1.0) : id;
+    auto it = string_consts_.find(actual_key);
+    if (it != string_consts_.end()) return it->second;
+    return "";
+}
 
-// std::string VM::getStorageStrValue(const std::string& key) const {
-//     auto it = storage_str_.find(key);
-//     return it != storage_str_.end() ? it->second : std::string();
-// }
+void VM::logMessage(const std::string& msg) {
+    onScriptLog(msg);
+}
 
 void VM::run() {
     std::size_t max_steps = 10000000;
@@ -323,7 +366,7 @@ void VM::run() {
         executeInstruction(code_[ip_]);
         if (ip_ >= code_.size()) break;
         if (++steps >= max_steps) {
-            LOG_ERROR("VM::run: step limit exceeded (%zu steps), possible infinite loop", max_steps);
+            PBZ_ERROR("VM::run: step limit exceeded (%zu steps), possible infinite loop", max_steps);
             break;
         }
     }
@@ -479,12 +522,36 @@ void VM::executeInstruction(const Instruction& instr) {
         case Op::Call: {
             auto it = functions_.find(instr.name);
             if (it == functions_.end()) {
-                LOG_ERROR("VM::Call: function '%s' not found", instr.name.c_str());
+                if (NativeFunctionRegistry::instance().hasDynamicFunction(instr.name)) {
+                    int argc = instr.index;
+                    std::vector<NativeValue> native_args;
+                    native_args.reserve(argc);
+                    for (int i = 0; i < argc && !stack_.empty(); ++i) {
+                        double raw = popStack();
+                        if (raw < 0.0) {
+                            native_args.insert(native_args.begin(), NativeValue(resolveString(raw)));
+                        } else {
+                            native_args.insert(native_args.begin(), NativeValue(raw));
+                        }
+                    }
+                    NativeValue ret = callFunctionDynamic(instr.name, native_args);
+                    if (ret.type == NativeValueType::String) {
+                        double new_id = string_id_counter_;
+                        string_consts_[new_id] = ret.sval;
+                        ++string_id_counter_;
+                        pushStack(-(new_id + 1.0));
+                    } else {
+                        pushStack(ret.dval);
+                    }
+                    ++ip_;
+                    break;
+                }
+                PBZ_ERROR("VM::Call: function '%s' not found", instr.name.c_str());
                 ++ip_;
                 break;
             }
             if (call_frames_.size() >= 256) {
-                LOG_ERROR("VM::Call: call stack overflow (depth=%zu) calling '%s'",
+                PBZ_ERROR("VM::Call: call stack overflow (depth=%zu) calling '%s'",
                           call_frames_.size(), instr.name.c_str());
                 ++ip_;
                 break;
@@ -517,6 +584,47 @@ void VM::executeInstruction(const Instruction& instr) {
             }
             break;
         }
+        case Op::CallNative: {
+            int argc = instr.index;
+            std::vector<NativeValue> native_args;
+            native_args.reserve(argc);
+            for (int i = 0; i < argc && !stack_.empty(); ++i) {
+                double raw = popStack();
+                if (raw < 0.0) {
+                    native_args.insert(native_args.begin(), NativeValue(resolveString(raw)));
+                } else {
+                    native_args.insert(native_args.begin(), NativeValue(raw));
+                }
+            }
+            auto& reg = NativeFunctionRegistry::instance();
+            const auto* info = reg.getFunctionInfo(instr.name);
+            if (info && info->hasTypeInfo) {
+                if (native_args.size() != info->paramTypes.size()) {
+                    logMessage("Native function '" + instr.name + "' arg count mismatch: expected " +
+                               std::to_string(info->paramTypes.size()) + ", got " +
+                               std::to_string(native_args.size()));
+                    break;
+                }
+                for (std::size_t i = 0; i < native_args.size() && i < info->paramTypes.size(); ++i) {
+                    if (native_args[i].type != info->paramTypes[i]) {
+                        logMessage("Native function '" + instr.name + "' arg " +
+                                   std::to_string(i) + " type mismatch");
+                        break;
+                    }
+                }
+            }
+            NativeValue ret = reg.callFunction(instr.name, native_args);
+            if (ret.type == NativeValueType::String) {
+                double new_id = string_id_counter_;
+                string_consts_[new_id] = ret.sval;
+                ++string_id_counter_;
+                pushStack(-(new_id + 1.0));
+            } else {
+                pushStack(ret.dval);
+            }
+            ++ip_;
+            break;
+        }
         case Op::Return: {
             ip_ = code_.size();
             if (!locals_.empty()) locals_.pop_back();
@@ -541,7 +649,7 @@ void VM::executeInstruction(const Instruction& instr) {
         }
         case Op::Break:
         case Op::Continue:
-            LOG_ERROR("VM: unexpected Break/Continue at ip=%zu (should have been patched to jump)", ip_);
+            PBZ_ERROR("VM: unexpected Break/Continue at ip=%zu (should have been patched to jump)", ip_);
             ip_ = code_.size();
             break;
         case Op::Sin: {
@@ -873,30 +981,28 @@ void VM::executeInstruction(const Instruction& instr) {
         case Op::StorageGet: {
             double def = popStack();
             std::string key = instr.name;
-            auto it = storage_.find(key);
-            pushStack(it != storage_.end() ? it->second : def);
+            pushStack(onStorageGet(key, def));
             ++ip_;
             break;
         }
         case Op::StorageSet: {
             double val = popStack();
             std::string key = instr.name;
-            storage_[key] = val;
+            onStorageSet(key, val);
             ++ip_;
             break;
         }
         case Op::StorageGetStr: {
             double def_id = popStack();
             std::string key = instr.name;
-            auto it = storage_str_.find(key);
-            if (it != storage_str_.end()) {
-                double new_id = string_id_counter_;
-                string_consts_[new_id] = it->second;
-                ++string_id_counter_;
-                pushStack(new_id);
-            } else {
-                pushStack(def_id);
-            }
+            std::string def_str = "";
+            auto it = string_consts_.find(def_id);
+            if (it != string_consts_.end()) def_str = it->second;
+            std::string val = onStorageGetStr(key, def_str);
+            double new_id = string_id_counter_;
+            string_consts_[new_id] = val;
+            ++string_id_counter_;
+            pushStack(new_id);
             ++ip_;
             break;
         }
@@ -905,7 +1011,7 @@ void VM::executeInstruction(const Instruction& instr) {
             std::string key = instr.name;
             auto it = string_consts_.find(str_id);
             if (it != string_consts_.end()) {
-                storage_str_[key] = it->second;
+                onStorageSetStr(key, it->second);
             }
             ++ip_;
             break;
@@ -940,14 +1046,14 @@ void VM::executeInstruction(const Instruction& instr) {
             double idx = popStack();
             auto it = arrays_.find(instr.name);
             if (it == arrays_.end()) {
-                LOG_ERROR("ArrayGet: array '%s' not found", instr.name.c_str());
+                PBZ_ERROR("ArrayGet: array '%s' not found", instr.name.c_str());
                 pushStack(0.0);
                 ++ip_;
                 break;
             }
             std::size_t i = static_cast<std::size_t>(idx);
             if (i >= it->second.size()) {
-                LOG_ERROR("ArrayGet: index %zu out of bounds for array '%s' (size=%zu)",
+                PBZ_ERROR("ArrayGet: index %zu out of bounds for array '%s' (size=%zu)",
                           i, instr.name.c_str(), it->second.size());
                 pushStack(0.0);
             } else {
@@ -962,7 +1068,7 @@ void VM::executeInstruction(const Instruction& instr) {
             auto& arr = arrays_[instr.name];
             std::size_t i = static_cast<std::size_t>(idx);
             if (i >= arr.size()) {
-                LOG_ERROR("ArraySet: index %zu out of bounds for array '%s' (size=%zu), resizing",
+                PBZ_ERROR("ArraySet: index %zu out of bounds for array '%s' (size=%zu), resizing",
                           i, instr.name.c_str(), arr.size());
                 arr.resize(i + 1, 0.0);
             }
@@ -989,7 +1095,7 @@ void VM::executeInstruction(const Instruction& instr) {
             break;
         }
         default:
-            LOG_ERROR("VM: unknown opcode %d at ip=%zu", static_cast<int>(instr.op), ip_);
+            PBZ_ERROR("VM: unknown opcode %d at ip=%zu", static_cast<int>(instr.op), ip_);
             ++ip_;
             break;
     }
@@ -998,100 +1104,92 @@ void VM::executeInstruction(const Instruction& instr) {
 
 void VM::dump_render_vars() const
 { 
-    LOG_DEBUG("==Render vars :");
-    LOG_DEBUG("  current_color_: has[%d] = %d  color[%f, %f, %f]", has_color_, current_color_.r, current_color_.g, current_color_.b);
-    LOG_DEBUG("  time_ms_: %f delta_ms_: %f", time_ms_, delta_ms_);
-    LOG_DEBUG("  pixel_index_: %zu  pixel_count_: %f", pixel_index_, pixel_count_);
-    LOG_DEBUG("  grid_width_: %zu grid_height_: %zu grid_depth_: %zu", grid_width_, grid_height_, grid_depth_);
+    PBZ_DEBUG("==Render vars :");
+    PBZ_DEBUG("  current_color_: has[%d] = %d  color[%f, %f, %f]", has_color_, current_color_.r, current_color_.g, current_color_.b);
+    PBZ_DEBUG("  time_ms_: %f delta_ms_: %f", time_ms_, delta_ms_);
+    PBZ_DEBUG("  pixel_index_: %zu  pixel_count_: %f", pixel_index_, pixel_count_);
+    PBZ_DEBUG("  grid_width_: %zu grid_height_: %zu grid_depth_: %zu", grid_width_, grid_height_, grid_depth_);
 }
 
 void VM::dump_vars() const
 {
-    LOG_DEBUG("==Globals  vars(%zu):", globals_.size());
+    PBZ_DEBUG("==Globals  vars(%zu):", globals_.size());
     for (const auto& kv : globals_) {
-        LOG_DEBUG("  %s = %f", kv.first.c_str(), kv.second);
+        PBZ_DEBUG("  %s = %f", kv.first.c_str(), kv.second);
     }
 
-    LOG_DEBUG("==Locals  vars(%zu frames):", locals_.size());
+    PBZ_DEBUG("==Locals  vars(%zu frames):", locals_.size());
     for (std::size_t f = 0; f < locals_.size(); ++f) {
-        LOG_DEBUG("  Frame %zu (%zu vars):", f, locals_[f].size());
+        PBZ_DEBUG("  Frame %zu (%zu vars):", f, locals_[f].size());
         for (const auto& kv : locals_[f]) {
-            LOG_DEBUG("    %s = %f", kv.first.c_str(), kv.second);
+            PBZ_DEBUG("    %s = %f", kv.first.c_str(), kv.second);
         }
     }
 
-    LOG_DEBUG("==String constants (%zu):", string_consts_.size());
+    PBZ_DEBUG("==String constants (%zu):", string_consts_.size());
     for (const auto& kv : string_consts_) {
-        LOG_DEBUG("  id=%f -> \"%s\"", kv.first, kv.second.c_str());
+        PBZ_DEBUG("  id=%f -> \"%s\"", kv.first, kv.second.c_str());
     }
 
-    LOG_DEBUG("==Arrays (%zu):", arrays_.size());
+    PBZ_DEBUG("==Arrays (%zu):", arrays_.size());
     for (const auto& kv : arrays_) {
-        LOG_DEBUG("  %s (%zu): [", kv.first.c_str(), kv.second.size());
+        PBZ_DEBUG("  %s (%zu): [", kv.first.c_str(), kv.second.size());
         for (std::size_t i = 0; i < kv.second.size() && i < 10; ++i) {
-            if (i > 0) LOG_DEBUG(", ");
-            LOG_DEBUG("%f", kv.second[i]);
+            if (i > 0) PBZ_DEBUG(", ");
+            PBZ_DEBUG("%f", kv.second[i]);
         }
-        if (kv.second.size() > 10) LOG_DEBUG(", ...");
-        LOG_DEBUG("]");
+        if (kv.second.size() > 10) PBZ_DEBUG(", ...");
+        PBZ_DEBUG("]");
     } 
 }
 
 void VM::dump_storage_vars() const
 {
-    LOG_DEBUG("==Storage (numeric, %zu):", storage_.size());
-    for (const auto& kv : storage_) {
-        LOG_DEBUG("  %s = %f", kv.first.c_str(), kv.second);
-    }
-
-    LOG_DEBUG("==Storage (string, %zu):", storage_str_.size());
-    for (const auto& kv : storage_str_) {
-        LOG_DEBUG("  %s = \"%s\"", kv.first.c_str(), kv.second.c_str());
-    }
+    PBZ_DEBUG("==Storage (no storage backend installed)");
 }
 
 void VM::dump_exports() const
 {
-    LOG_DEBUG("==Exports (%zu):", exports_.size());
+    PBZ_DEBUG("==Exports (%zu):", exports_.size());
     for (const auto& kv : exports_) {
-        LOG_DEBUG("  %s = %f", kv.first.c_str(), kv.second);
+        PBZ_DEBUG("  %s = %f", kv.first.c_str(), kv.second);
     }
 }
 
 void VM::dump_functions() const
 {
-    LOG_DEBUG("==Functions (%zu):", functions_.size());
+    PBZ_DEBUG("==Functions (%zu):", functions_.size());
     for (const auto& kv : functions_) {
-        LOG_DEBUG("  name: %s", kv.first.c_str());
+        PBZ_DEBUG("  name: %s", kv.first.c_str());
         kv.second.dump();
     }
-    LOG_DEBUG("  BeforeRender: %s", before_render_name_.empty() ? "(none)" : before_render_name_.c_str());
-    LOG_DEBUG("  Render: %s", render_name_.empty() ? "(none)" : render_name_.c_str());
+    PBZ_DEBUG("  BeforeRender: %s", before_render_name_.empty() ? "(none)" : before_render_name_.c_str());
+    PBZ_DEBUG("  Render: %s", render_name_.empty() ? "(none)" : render_name_.c_str());
 }
 
 void VM::dump_current_frame() const
 {
-    LOG_DEBUG("==Current frame");
+    PBZ_DEBUG("==Current frame");
 
-    LOG_DEBUG("  Instruction: ip=%zu", ip_);
+    PBZ_DEBUG("  Instruction: ip=%zu", ip_);
     for (std::size_t i = 0; i < code_.size(); ++i) {
         code_[i].dump();
     }
 
-    LOG_DEBUG("  Stack (%zu items):", stack_.size());
+    PBZ_DEBUG("  Stack (%zu items):", stack_.size());
     for (std::size_t i = 0; i < stack_.size(); ++i) {
-        LOG_DEBUG("    [%zu] %f", i, stack_[i]);
+        PBZ_DEBUG("    [%zu] %f", i, stack_[i]);
     }
 
-    LOG_DEBUG(" Return stack (%zu items):", return_stack_.size());
+    PBZ_DEBUG(" Return stack (%zu items):", return_stack_.size());
     for (std::size_t i = 0; i < return_stack_.size(); ++i) {
-        LOG_DEBUG("    [%zu] ip=%zu", i, return_stack_[i]);
+        PBZ_DEBUG("    [%zu] ip=%zu", i, return_stack_[i]);
     }
 }
 
 void VM::dump_frametrace() const
 { 
-    LOG_DEBUG("==Call frames (%zu):", call_frames_.size());
+    PBZ_DEBUG("==Call frames (%zu):", call_frames_.size());
     for (std::size_t f = 0; f < call_frames_.size(); ++f) {
         call_frames_[f].dump();
     }
@@ -1099,7 +1197,7 @@ void VM::dump_frametrace() const
 
 
 void VM::dump() const {
-    LOG_DEBUG("=== VM Dump ===");
+    PBZ_DEBUG("=== VM Dump ===");
     
     dump_vars();
     dump_exports();
@@ -1109,7 +1207,7 @@ void VM::dump() const {
     dump_current_frame();
     dump_frametrace();
 
-    LOG_DEBUG("=== End VM Dump ===");
+    PBZ_DEBUG("=== End VM Dump ===");
 }
 #endif
 }  // namespace pixelblaze_cpp
