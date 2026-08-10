@@ -112,7 +112,8 @@ int main(int argc, char** argv) {
 
         pixelblaze_cpp::Program program = compiler.compile(source);
         if (!compiler.parse_ok()) {
-            std::cerr << "Failed to compile script.\n";
+            std::cerr << "Failed to compile script.\n"
+                      << "Error context: " << compiler.error_context() << "\n";
             return 1;
         }
 

@@ -27,6 +27,7 @@ const char* opToString(Op op) {
         case Op::Gt: return "Gt";
         case Op::Ge: return "Ge";
         case Op::Not: return "Not";
+        case Op::BitNot: return "BitNot";
         case Op::And: return "And";
         case Op::Or: return "Or";
         case Op::Jump: return "Jump";
@@ -67,6 +68,7 @@ const char* opToString(Op op) {
         case Op::Min: return "Min";
         case Op::Max: return "Max";
         case Op::Floor: return "Floor";
+        case Op::Frac: return "Frac";
         case Op::Ceil: return "Ceil";
         case Op::Round: return "Round";
         case Op::Pow: return "Pow";
@@ -80,6 +82,7 @@ const char* opToString(Op op) {
         case Op::Map: return "Map";
         case Op::Constrain: return "Constrain";
         case Op::Mix: return "Mix";
+        case Op::Smoothstep: return "Smoothstep";
         case Op::ArrayGet: return "ArrayGet";
         case Op::ArraySet: return "ArraySet";
         case Op::ArrayDecl: return "ArrayDecl";

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -23,6 +24,10 @@ void PixelblazeCompiler::compileArgs(const std::vector<std::string>& args,
             return;
         }
     }
+}
+
+bool PixelblazeCompiler::isArrayTempName(const std::string& name) {
+    return name.rfind("__arr_lit_", 0) == 0 || name.rfind("__arr_decl_", 0) == 0;
 }
 
 bool PixelblazeCompiler::isIdentChar(char c) {
@@ -402,6 +407,11 @@ Program PixelblazeCompiler::compile(const std::string& source) const {
     compileTopLevel(std::move(src), program);
 
     if (parse_ok_) {
+        // 验证程序中所有函数调用和变量引用都有定义
+        validateProgram(program);
+    }
+
+    if (parse_ok_) {
         PBZ_INFO("Compile OK: main_code=%zu instructions, functions=%zu",
                  program.main_code.size(), program.functions.size());
     } else {
@@ -414,13 +424,63 @@ Program PixelblazeCompiler::compile(const std::string& source) const {
     return program;
 }
 
+bool PixelblazeCompiler::validateProgram(const Program& program) const {
+    auto& reg = NativeFunctionRegistry::instance();
+    bool valid = true;
+
+    // 收集所有已定义的函数名
+    std::set<std::string> defined_functions;
+    for (const auto& [name, fn] : program.functions) {
+        defined_functions.insert(name);
+    }
+
+    // 检查代码段中的指令
+    auto check_instructions = [&](const std::vector<Instruction>& code, const std::string& context) {
+        for (std::size_t i = 0; i < code.size(); ++i) {
+            const auto& instr = code[i];
+
+            // 检查函数调用
+            if (instr.op == Op::Call) {
+                const std::string& func_name = instr.name;
+                // 检查是否是内置函数
+                if (reg.builtins().find(func_name) == reg.builtins().end() &&
+                    !reg.hasFunction(func_name) &&
+                    !reg.hasDynamicFunction(func_name) &&
+                    defined_functions.find(func_name) == defined_functions.end()) {
+                    PBZ_ERROR("Undefined function '%s' called at %s", func_name.c_str(), context.c_str());
+                    valid = false;
+                }
+            }
+
+            // 检查变量引用（可选：警告未定义的变量）
+            // 注意：全局变量可能在运行时定义，所以只检查函数调用
+        }
+    };
+
+    // 检查主代码
+    check_instructions(program.main_code, "main");
+
+    // 检查所有函数的代码
+    for (const auto& [name, fn] : program.functions) {
+        check_instructions(fn.code, "function '" + name + "'");
+    }
+
+    if (!valid) {
+        parse_ok_ = false;
+    }
+
+    return valid;
+}
+
 void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) const {
-    while (!src.empty()) {
+    while (!src.empty() && parse_ok_) {
         std::size_t pos = skipWS(0, src);
         if (pos >= src.size()) break;
 
         src.erase(0, pos);
         if (src.empty()) break;
+
+        error_context_ = "top-level: " + src.substr(0, std::min<std::size_t>(80, src.size()));
 
         std::string lower = toLower(src);
 
@@ -438,12 +498,17 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
             p = skipWS(p, src);
             std::vector<std::string> params;
             if (p < src.size() && src[p] == '(') {
-                std::string paren_body = findMatchingParen(src, p);
-                if (paren_body.empty()) {
-                    PBZ_ERROR("Parse error: unmatched '(' in function '%s'", name.c_str());
-                    parseError(); break;
+                std::string paren_body;
+                if (p + 1 < src.size() && src[p + 1] == ')') {
+                    p += 2;
+                } else {
+                    paren_body = findMatchingParen(src, p);
+                    if (paren_body.empty()) {
+                        PBZ_ERROR("Parse error: unmatched '(' in function '%s'", name.c_str());
+                        parseError(); break;
+                    }
+                    p += paren_body.size() + 2;
                 }
-                p += paren_body.size() + 2;
                 params = splitTopLevelArgs(paren_body);
             }
 
@@ -464,8 +529,8 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 fn.code.push_back(Instruction::ret());
                 program.functions[name] = fn;
 
-                PBZ_INFO("Function '%s' compiled: %zu instructions, %zu params",
-                         name.c_str(), fn.code.size(), params.size());
+                // PBZ_INFO("Function '%s' compiled: %zu instructions, %zu params",
+                //          name.c_str(), fn.code.size(), params.size());
 
                 std::string lower_name = toLower(name);
                 if (lower_name == "beforerender") {
@@ -503,12 +568,17 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 fn_p = skipWS(fn_p, src);
                 std::vector<std::string> fn_params;
                 if (fn_p < src.size() && src[fn_p] == '(') {
-                    std::string paren_body = findMatchingParen(src, fn_p);
-                    if (paren_body.empty()) {
-                        PBZ_ERROR("Parse error: unmatched '(' in export function '%s'", fn_name.c_str());
-                        parseError(); break;
+                    std::string paren_body;
+                    if (fn_p + 1 < src.size() && src[fn_p + 1] == ')') {
+                        fn_p += 2;
+                    } else {
+                        paren_body = findMatchingParen(src, fn_p);
+                        if (paren_body.empty()) {
+                            PBZ_ERROR("Parse error: unmatched '(' in export function '%s'", fn_name.c_str());
+                            parseError(); break;
+                        }
+                        fn_p += paren_body.size() + 2;
                     }
-                    fn_p += paren_body.size() + 2;
                     fn_params = splitTopLevelArgs(paren_body);
                 }
 
@@ -529,7 +599,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                     fn.code.push_back(Instruction::ret());
                     program.functions[fn_name] = fn;
 
-                    PBZ_INFO("Export function '%s' compiled: %zu instructions", fn_name.c_str(), fn.code.size());
+                    // PBZ_INFO("Export function '%s' compiled: %zu instructions", fn_name.c_str(), fn.code.size());
 
                     std::string lower_fn = toLower(fn_name);
                     if (lower_fn == "beforerender") {
@@ -606,29 +676,29 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 }
 
                 for (const auto& vn : var_names) {
-                    PBZ_INFO("Export var '%s'", vn.c_str());
+                    // PBZ_INFO("Export var '%s'", vn.c_str());
                     program.export_vars.push_back(vn);
                     program.main_code.push_back(Instruction::declVar(vn));
                 }
 
-                std::size_t bracket_pos = line.find('[');
-                if (bracket_pos != std::string::npos && line.back() == ']') {
-                    std::string size_str = line.substr(bracket_pos + 1, line.size() - bracket_pos - 2);
-                    double size_val = 0.0;
-                    try { size_val = std::stod(trim(size_str)); } catch (...) { parseError(); }
-                    program.main_code.push_back(Instruction::push(size_val));
-                    program.main_code.push_back(Instruction::arrayDecl(var_names[0]));
-                } else if (!init_expr.empty() && var_names.size() == 1) {
-                    std::size_t before = program.main_code.size();
-                    bool ok = compileAssignExpr(init_expr, program.main_code, true);
-                    if (!ok) { parseError(); break; }
-                    if (program.main_code.size() > before &&
-                        program.main_code.back().op == Op::ArrayLiteral &&
-                        program.main_code.back().name.rfind("__arr_lit_", 0) == 0) {
-                        program.main_code.back().name = var_names[0];
+                std::size_t bracket_pos = names_part.find('[');
+                if (bracket_pos != std::string::npos && names_part.back() == ']') {
+                    if (!init_expr.empty() && var_names.size() == 1) {
+                        bool ok = compileAssignExpr(init_expr, program.main_code, true);
+                        if (!ok) { parseError(); break; }
+                        program.main_code.push_back(Instruction::setVar(var_names[0]));
                     } else {
+                        std::string size_str = names_part.substr(bracket_pos + 1, names_part.size() - bracket_pos - 2);
+                        double size_val = 0.0;
+                        try { size_val = std::stod(trim(size_str)); } catch (...) { parseError(); }
+                        program.main_code.push_back(Instruction::push(size_val));
+                        program.main_code.push_back(Instruction::arrayDecl(var_names[0]));
                         program.main_code.push_back(Instruction::setVar(var_names[0]));
                     }
+                } else if (!init_expr.empty() && var_names.size() == 1) {
+                    bool ok = compileAssignExpr(init_expr, program.main_code, true);
+                    if (!ok) { parseError(); break; }
+                    program.main_code.push_back(Instruction::setVar(var_names[0]));
                 } else if (!init_expr.empty()) {
                     bool ok = compileAssignExpr(init_expr, program.main_code, true);
                     if (!ok) { parseError(); break; }
@@ -659,6 +729,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 src.erase(0, line_end + 1);
             }
             compileStatement(line, program.main_code);
+            if (!parse_ok_) return;
             continue;
         }
 
@@ -675,6 +746,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
                 if (line_end == std::string::npos) src.clear();
                 else src.erase(0, line_end + 1);
                 compileStatement(line, program.main_code);
+                if (!parse_ok_) return;
                 continue;
             }
         }
@@ -688,6 +760,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
             while (!stripped.empty() && stripped.back() == ';') stripped.pop_back();
             if (!stripped.empty()) {
                 compileStatement(stripped, program.main_code);
+                if (!parse_ok_) return;
             }
             if (line_end == std::string::npos) break;
             src.erase(0, line_end + 1);
@@ -697,6 +770,7 @@ void PixelblazeCompiler::compileTopLevel(std::string src, Program& program) cons
             while (!stmt.empty() && stmt.back() == ';') stmt.pop_back();
             if (!stmt.empty()) {
                 compileStatement(stmt, program.main_code);
+                if (!parse_ok_) return;
             }
             src.erase(0, stmt_end);
         }
@@ -710,6 +784,8 @@ void PixelblazeCompiler::compileBlock(const std::string& source, std::vector<Ins
         if (pos >= src.size()) break;
         src.erase(0, pos);
         if (src.empty()) break;
+
+        error_context_ = "block: " + src.substr(0, std::min<std::size_t>(80, src.size()));
 
         if (src.front() == ';') {
             src.erase(src.begin());
@@ -725,6 +801,7 @@ void PixelblazeCompiler::compileBlock(const std::string& source, std::vector<Ins
             while (!stripped.empty() && stripped.back() == ';') stripped.pop_back();
             if (!stripped.empty()) {
                 compileStatement(stripped, out, loop_depth);
+                if (!parse_ok_) return;
             }
             if (line_end == std::string::npos) break;
             src.erase(0, line_end + 1);
@@ -734,6 +811,7 @@ void PixelblazeCompiler::compileBlock(const std::string& source, std::vector<Ins
             while (!stmt.empty() && stmt.back() == ';') stmt.pop_back();
             if (!stmt.empty()) {
                 compileStatement(stmt, out, loop_depth);
+                if (!parse_ok_) return;
             }
             src.erase(0, stmt_end);
         }
@@ -746,6 +824,8 @@ void PixelblazeCompiler::compileStatement(std::string& stmt, std::vector<Instruc
     }
     stmt = trim(stmt);
     if (stmt.empty()) return;
+
+    error_context_ = "stmt: " + stmt.substr(0, std::min<std::size_t>(80, stmt.size()));
 
     std::string lower = toLower(stmt);
 
@@ -807,36 +887,49 @@ void PixelblazeCompiler::compileStatement(std::string& stmt, std::vector<Instruc
         if (items.empty()) { parseError(); return; }
 
         for (const auto& item : items) {
-            std::size_t bracket_pos = item.find('[');
-            if (bracket_pos != std::string::npos && item.back() == ']') {
-                std::string var_name = trim(item.substr(0, bracket_pos));
-                if (var_name.empty()) { parseError(); return; }
-                std::string size_str = item.substr(bracket_pos + 1, item.size() - bracket_pos - 2);
-                double size_val = 0.0;
-                try { size_val = std::stod(trim(size_str)); } catch (...) { parseError(); return; }
-                out.push_back(Instruction::push(size_val));
-                out.push_back(Instruction::arrayDecl(var_name));
-                continue;
-            }
-
             std::size_t eq_pos = item.find('=');
             if (eq_pos != std::string::npos) {
-                std::string var_name = trim(item.substr(0, eq_pos));
+                std::string lhs = trim(item.substr(0, eq_pos));
                 std::string expr = trim(item.substr(eq_pos + 1));
-                if (var_name.empty() || expr.empty()) { parseError(); return; }
-                out.push_back(Instruction::declVar(var_name));
-                std::size_t before = out.size();
-                bool ok = compileAssignExpr(expr, out, true);
-                if (!ok) { parseError(); return; }
-                if (out.size() > before && out.back().op == Op::ArrayLiteral && out.back().name.rfind("__arr_lit_", 0) == 0) {
-                    out.back().name = var_name;
-                } else {
+                if (lhs.empty() || expr.empty()) { parseError(); return; }
+
+                std::size_t lb = lhs.find('[');
+                if (lb != std::string::npos && lhs.back() == ']') {
+                    std::string var_name = trim(lhs.substr(0, lb));
+                    if (var_name.empty()) { parseError(); return; }
+                    out.push_back(Instruction::declVar(var_name));
+                    bool ok = compileAssignExpr(expr, out, true);
+                    if (!ok) { parseError(); return; }
                     out.push_back(Instruction::setVar(var_name));
+                } else {
+                    out.push_back(Instruction::declVar(lhs));
+                    std::size_t before = out.size();
+                    bool ok = compileAssignExpr(expr, out, true);
+                    if (!ok) { parseError(); return; }
+                    bool already_set = false;
+                    if (out.size() > before && out.back().op == Op::SetVar && out.back().name == lhs) {
+                        already_set = true;
+                    }
+                    if (!already_set) {
+                        out.push_back(Instruction::setVar(lhs));
+                    }
                 }
             } else {
-                std::string var_name = trim(item);
-                if (var_name.empty()) { parseError(); return; }
-                out.push_back(Instruction::declVar(var_name));
+                std::size_t bracket_pos = item.find('[');
+                if (bracket_pos != std::string::npos && item.back() == ']') {
+                    std::string var_name = trim(item.substr(0, bracket_pos));
+                    if (var_name.empty()) { parseError(); return; }
+                    std::string size_str = item.substr(bracket_pos + 1, item.size() - bracket_pos - 2);
+                    double size_val = 0.0;
+                    try { size_val = std::stod(trim(size_str)); } catch (...) { parseError(); return; }
+                    out.push_back(Instruction::push(size_val));
+                    out.push_back(Instruction::arrayDecl(var_name));
+                    out.push_back(Instruction::setVar(var_name));
+                } else {
+                    std::string var_name = trim(item);
+                    if (var_name.empty()) { parseError(); return; }
+                    out.push_back(Instruction::declVar(var_name));
+                }
             }
         }
         return;
@@ -872,9 +965,7 @@ void PixelblazeCompiler::compileStatement(std::string& stmt, std::vector<Instruc
 
     bool has_value = compileAssignExpr(stmt, out);
     if (has_value) {
-        if (out.empty() || out.back().op != Op::ArrayLiteral) {
-            out.push_back(Instruction::pop());
-        }
+        out.push_back(Instruction::pop());
     }
 }
 
@@ -926,7 +1017,8 @@ void PixelblazeCompiler::compileIf(const std::string& src, std::vector<Instructi
             if (matchKeywordAt(tail, ep, "if")) {
                 std::string else_rest = trim(tail.substr(4));
                 std::vector<Instruction> else_code;
-                compileIf(else_rest, else_code, loop_depth);
+                compileIf(else_rest, else_code, loop_depth); 
+                if (!parse_ok_) return;
                 int jump_over_else = static_cast<int>(body_code.size()) + 1;
                 out.push_back(Instruction::jumpIfFalse(jump_over_else + 1));
                 for (auto& instr : body_code) out.push_back(instr);
@@ -1010,7 +1102,7 @@ void PixelblazeCompiler::compileFor(const std::string& src, std::vector<Instruct
     std::vector<Instruction> post_code;
     std::vector<Instruction> body_code;
 
-    if (!parts[0].empty()) compileStatement(parts[0], init_code, loop_depth);
+    if (!parts[0].empty()) {compileStatement(parts[0], init_code, loop_depth); if (!parse_ok_) return;}
     if (!parts[1].empty()) {
         bool ok = compileAssignExpr(parts[1], cond_code, true);
         if (!ok) { parseError(); return; }
@@ -1211,6 +1303,8 @@ void PixelblazeCompiler::emitBuiltin(const std::string& name, const std::vector<
         out.back().index = static_cast<int>(args.size());
         return;
     }
+    // 未知函数：假设是用户定义的函数，生成 Call 指令
+    compileArgs(args, out, *const_cast<PixelblazeCompiler*>(this));
     out.push_back(Instruction::call(name));
     out.back().index = static_cast<int>(args.size());
 }
@@ -1251,7 +1345,7 @@ std::size_t PixelblazeCompiler::parsePrimary(const std::string& s, std::size_t p
             return pos;
         }
         std::vector<std::string> items;
-        int depth = 0;
+        int depth = 1;  // Start at 1 because we're already inside '['
         std::size_t item_start = pos;
         bool in_str = false;
         char str_ch = 0;
@@ -1266,17 +1360,21 @@ std::size_t PixelblazeCompiler::parsePrimary(const std::string& s, std::size_t p
             if (ic == '"' || ic == '\'') { in_str = true; str_ch = ic; ++pos; continue; }
             if (ic == '(' || ic == '{' || ic == '[') ++depth;
             else if (ic == ')' || ic == '}' || ic == ']') --depth;
-            if (depth == 0 && ic == ',') {
-                items.push_back(trim(s.substr(item_start, pos - item_start)));
-                item_start = pos + 1;
-            } else if (depth == 0 && ic == ']') {
+            if (depth == 0 && ic == ']') {
                 items.push_back(trim(s.substr(item_start, pos - item_start)));
                 ++pos;
                 break;
+            } else if (depth == 1 && ic == ',') {
+                items.push_back(trim(s.substr(item_start, pos - item_start)));
+                item_start = pos + 1;
             }
             ++pos;
         }
-        if (pos >= s.size()) { parseError(); return std::string::npos; }
+        if (pos > s.size()) {
+            PBZ_ERROR("Array literal parsing failed: pos=%zu, s.size=%zu, items.size=%zu", pos, s.size(), items.size());
+            parseError();
+            return std::string::npos;
+        }
         std::size_t n = items.size();
         for (const auto& item : items) {
             if (!compileAssignExpr(trim(item), out, true)) { parseError(); return std::string::npos; }
@@ -1371,7 +1469,7 @@ std::size_t PixelblazeCompiler::parsePrimary(const std::string& s, std::size_t p
                 }
                 if (ch == '"' || ch == '\'') { in_str = true; str_ch = ch; ++ap; continue; }
                 if (ch == '(' || ch == '{' || ch == '[') ++depth;
-                else if (ch == ')') {
+                else if (ch == ')' || ch == '}' || ch == ']') {
                     --depth;
                     if (depth == 0) break;
                 } else if (ch == ',' && depth == 1) {
@@ -1409,12 +1507,12 @@ std::size_t PixelblazeCompiler::parsePrimary(const std::string& s, std::size_t p
         return pos;
     }
 
-    parseError();
     return std::string::npos;
 }
 
 std::size_t PixelblazeCompiler::parsePostfix(const std::string& s, std::size_t pos, std::vector<Instruction>& out) const {
     pos = parsePrimary(s, pos, out);
+    if (!parse_ok_) return std::string::npos;
     if (pos == std::string::npos) return std::string::npos;
     pos = skipWS(pos, s);
     while (pos + 1 < s.size() && ((s[pos] == '+' && s[pos + 1] == '+') ||
@@ -1459,12 +1557,14 @@ std::size_t PixelblazeCompiler::parseUnary(const std::string& s, std::size_t pos
         pos += 2;
     }
     pos = skipWS(pos, s);
-    if (pos < s.size() && (s[pos] == '-' || s[pos] == '!')) {
+    if (pos < s.size() && (s[pos] == '-' || s[pos] == '!' || s[pos] == '~')) {
         char op = s[pos];
         ++pos;
         pos = parseUnary(s, pos, out);
         if (pos == std::string::npos) return std::string::npos;
-        out.push_back(Instruction::makeOp(op == '-' ? Op::Neg : Op::Not));
+        if (op == '-') out.push_back(Instruction::makeOp(Op::Neg));
+        else if (op == '~') out.push_back(Instruction::makeOp(Op::BitNot));
+        else out.push_back(Instruction::makeOp(Op::Not));
         return pos;
     }
     if (pos < s.size() && s[pos] == '+') {
@@ -1547,9 +1647,10 @@ std::size_t PixelblazeCompiler::parseAdd(const std::string& s, std::size_t pos, 
 }
 
 std::size_t PixelblazeCompiler::parseRel(const std::string& s, std::size_t pos, std::vector<Instruction>& out) const {
+    pos = parseAdd(s, pos, out);
+    if (pos == std::string::npos) return std::string::npos;
+
     while (true) {
-        pos = parseAdd(s, pos, out);
-        if (pos == std::string::npos) return std::string::npos;
         pos = skipWS(pos, s);
         if (pos + 1 < s.size() && s[pos] == '<' && s[pos + 1] == '=') {
             pos += 2;
@@ -1583,9 +1684,10 @@ std::size_t PixelblazeCompiler::parseRel(const std::string& s, std::size_t pos, 
 }
 
 std::size_t PixelblazeCompiler::parseEq(const std::string& s, std::size_t pos, std::vector<Instruction>& out) const {
+    pos = parseRel(s, pos, out);
+    if (pos == std::string::npos) return std::string::npos;
+
     while (true) {
-        pos = parseRel(s, pos, out);
-        if (pos == std::string::npos) return std::string::npos;
         pos = skipWS(pos, s);
         if (pos + 1 < s.size() && s[pos] == '=' && s[pos + 1] == '=') {
             pos += 2;
@@ -1599,15 +1701,18 @@ std::size_t PixelblazeCompiler::parseEq(const std::string& s, std::size_t pos, s
             pos = parseRel(s, pos, out);
             if (pos == std::string::npos) return std::string::npos;
             out.push_back(Instruction::makeOp(Op::Ne));
-        } else break;
+        } else {
+            break;
+        }
     }
     return pos;
 }
 
 std::size_t PixelblazeCompiler::parseAnd(const std::string& s, std::size_t pos, std::vector<Instruction>& out) const {
+    pos = parseEq(s, pos, out);
+    if (pos == std::string::npos) return std::string::npos;
+
     while (true) {
-        pos = parseEq(s, pos, out);
-        if (pos == std::string::npos) return std::string::npos;
         pos = skipWS(pos, s);
         if (pos + 1 < s.size() && s[pos] == '&' && s[pos + 1] == '&') {
             pos += 2;
@@ -1621,9 +1726,10 @@ std::size_t PixelblazeCompiler::parseAnd(const std::string& s, std::size_t pos, 
 }
 
 std::size_t PixelblazeCompiler::parseOr(const std::string& s, std::size_t pos, std::vector<Instruction>& out) const {
+    pos = parseAnd(s, pos, out);
+    if (pos == std::string::npos) return std::string::npos;
+
     while (true) {
-        pos = parseAnd(s, pos, out);
-        if (pos == std::string::npos) return std::string::npos;
         pos = skipWS(pos, s);
         if (pos + 1 < s.size() && s[pos] == '|' && s[pos + 1] == '|') {
             pos += 2;
@@ -1759,11 +1865,15 @@ bool PixelblazeCompiler::compileAssignExpr(const std::string& expr, std::vector<
         if (c == '(' || c == '{' || c == '[') ++depth;
         else if (c == ')' || c == '}' || c == ']') --depth;
         else if (depth == 0) {
+            // Skip == and != comparison operators
             if (c == '=' && (i + 1 >= part.size() || part[i + 1] != '=')) {
-                asg.pos = i;
-                asg.op = '=';
-                has_assign = true;
-                break;
+                // Also check that previous char is not '!' (for !=)
+                if (i == 0 || part[i - 1] != '!') {
+                    asg.pos = i;
+                    asg.op = '=';
+                    has_assign = true;
+                    break;
+                }
             }
             if ((c == '+' || c == '-' || c == '*' || c == '/' || c == '%') &&
                 i + 1 < part.size() && part[i + 1] == '=') {
@@ -1786,15 +1896,31 @@ bool PixelblazeCompiler::compileAssignExpr(const std::string& expr, std::vector<
             std::string index_expr = target.substr(bracket + 1, target.size() - bracket - 2);
 
             if (asg.op == '=') {
-                std::size_t before_val = out.size();
-                bool val_ok = compileAssignExpr(value, out, true);
-                if (out.size() > before_val && out.back().op == Op::ArrayLiteral && out.back().name.rfind("__arr_lit_", 0) == 0) {
-                    out.back().name = arr_name;
+                if (!compileAssignExpr(index_expr, out, true)) {
+                    PBZ_ERROR("compileAssignExpr failed for index_expr='%s'", index_expr.c_str());
                     return false;
                 }
-                if (!val_ok) return false;
-                if (as_expression) out.push_back(Instruction::dup());
-                if (!compileAssignExpr(index_expr, out, true)) return false;
+                std::size_t before_val = out.size();
+                bool val_ok = compileAssignExpr(value, out, true);
+                if (!val_ok) {
+                    PBZ_ERROR("compileAssignExpr failed for value='%s'", value.c_str());
+                    return false;
+                }
+                // Disabled: allow array-to-array-element assignment for nested arrays
+                // if (out.size() > before_val &&
+                //     (out.back().op == Op::ArrayLiteral || out.back().op == Op::ArrayDecl) &&
+                //     isArrayTempName(out.back().name)) {
+                //     PBZ_ERROR("Cannot assign array to array element '%s[%s]'",
+                //               arr_name.c_str(), index_expr.c_str());
+                //     parseError();
+                //     return false;
+                // }
+                if (as_expression) {
+                    out.push_back(Instruction::dup());
+                    out.push_back(Instruction::rot());
+                } else {
+                    out.push_back(Instruction::swap());
+                }
                 out.push_back(Instruction::arraySet(arr_name));
                 return as_expression;
             } else {
@@ -1802,13 +1928,17 @@ bool PixelblazeCompiler::compileAssignExpr(const std::string& expr, std::vector<
                 out.push_back(Instruction::dup());
                 out.push_back(Instruction::arrayGet(arr_name));
 
-                std::size_t before_arr = out.size();
-                bool arr_val_ok = compileAssignExpr(value, out, true);
-                if (out.size() > before_arr && out.back().op == Op::ArrayLiteral && out.back().name.rfind("__arr_lit_", 0) == 0) {
-                    out.back().name = arr_name;
+                std::size_t before_val2 = out.size();
+                bool val_ok2 = compileAssignExpr(value, out, true);
+                if (out.size() > before_val2 &&
+                    (out.back().op == Op::ArrayLiteral || out.back().op == Op::ArrayDecl) &&
+                    isArrayTempName(out.back().name)) {
+                    PBZ_ERROR("Cannot assign array to array element '%s[%s]'",
+                              arr_name.c_str(), index_expr.c_str());
+                    parseError();
                     return false;
                 }
-                if (!arr_val_ok) return false;
+                if (!val_ok2) return false;
 
                 if (asg.op == '+') out.push_back(Instruction::makeOp(Op::Add));
                 else if (asg.op == '-') out.push_back(Instruction::makeOp(Op::Sub));
@@ -1830,9 +1960,12 @@ bool PixelblazeCompiler::compileAssignExpr(const std::string& expr, std::vector<
             if (asg.op == '=') {
                 std::size_t before = out.size();
                 bool val_ok = compileAssignExpr(value, out, true);
-                if (out.size() > before && out.back().op == Op::ArrayLiteral && out.back().name.rfind("__arr_lit_", 0) == 0) {
-                    out.back().name = target;
-                    return false;
+                if (out.size() > before &&
+                    (out.back().op == Op::ArrayLiteral || out.back().op == Op::ArrayDecl) &&
+                    isArrayTempName(out.back().name)) {
+                    if (as_expression) out.push_back(Instruction::dup());
+                    out.push_back(Instruction::setVar(target));
+                    return as_expression;
                 } else if (val_ok) {
                     if (as_expression) out.push_back(Instruction::dup());
                     out.push_back(Instruction::setVar(target));
@@ -1841,13 +1974,16 @@ bool PixelblazeCompiler::compileAssignExpr(const std::string& expr, std::vector<
                     return false;
                 }
             } else {
+                out.push_back(Instruction::getVar(target));
                 std::size_t before = out.size();
                 bool val_ok = compileAssignExpr(value, out, true);
-                if (out.size() > before && out.back().op == Op::ArrayLiteral && out.back().name.rfind("__arr_lit_", 0) == 0) {
-                    out.back().name = target;
-                    return false;
+                if (out.size() > before &&
+                    (out.back().op == Op::ArrayLiteral || out.back().op == Op::ArrayDecl) &&
+                    isArrayTempName(out.back().name)) {
+                    if (as_expression) out.push_back(Instruction::dup());
+                    out.push_back(Instruction::setVar(target));
+                    return as_expression;
                 }
-                out.push_back(Instruction::getVar(target));
                 if (!val_ok) return false;
                 if (asg.op == '+') out.push_back(Instruction::makeOp(Op::Add));
                 else if (asg.op == '-') out.push_back(Instruction::makeOp(Op::Sub));
@@ -2029,6 +2165,9 @@ void NativeFunctionRegistry::initBuiltins() {
     registerIdent("TWO_PI", [](std::vector<Instruction>& out) {
         out.push_back(Instruction::push(2.0 * M_PI));
     });
+    registerIdent("PI2", [](std::vector<Instruction>& out) {
+        out.push_back(Instruction::push(2.0 * M_PI));
+    });
     registerIdent("Math", [](std::vector<Instruction>& out) {
         out.push_back(Instruction::push(0.0));
     });
@@ -2048,6 +2187,12 @@ void NativeFunctionRegistry::initBuiltins() {
     registerBuiltinOp("square", Op::Square);
     registerBuiltinOp("noise", Op::Noise1D, {"noise1D", "noise_1d"});
     registerBuiltinOp("abs", Op::Abs);
+    registerBuiltinOp("exp", Op::Exp);
+    registerBuiltinOp("ln", Op::Ln);
+    registerBuiltinOp("log10", Op::Log10);
+    registerBuiltinOp("log2", Op::Log2);
+    registerBuiltinOp("atan2", Op::Atan2);
+    registerBuiltinOp("sign", Op::Sign);
     registerBuiltinOp("time", Op::Time);
     registerBuiltinOp("rgb", Op::Rgb);
     registerBuiltinOp("hsv", Op::Hsv);
@@ -2057,6 +2202,7 @@ void NativeFunctionRegistry::initBuiltins() {
     registerBuiltinOp("max", Op::Max);
     registerBuiltinOp("clamp", Op::Clamp);
     registerBuiltinOp("floor", Op::Floor);
+    registerBuiltinOp("frac", Op::Frac);
     registerBuiltinOp("ceil", Op::Ceil);
     registerBuiltinOp("round", Op::Round);
     registerBuiltinOp("pow", Op::Pow);
@@ -2065,7 +2211,18 @@ void NativeFunctionRegistry::initBuiltins() {
     registerBuiltinOp("map", Op::Map);
     registerBuiltinOp("constrain", Op::Constrain);
     registerBuiltinOp("mix", Op::Mix);
+    registerBuiltinOp("smoothstep", Op::Smoothstep);
     registerBuiltinOp("randomRange", Op::RandomRange);
+
+    auto mod_handler = [](const std::vector<std::string>& args,
+                           std::vector<Instruction>& out,
+                           PixelblazeCompiler& compiler) {
+        if (args.size() >= 2) {
+            PixelblazeCompiler::compileArgs(args, out, compiler);
+            out.push_back(Instruction::makeOp(Op::Mod));
+        }
+    };
+    registerBuiltin("mod", mod_handler);
 
     auto random_handler = [](const std::vector<std::string>& args,
                               std::vector<Instruction>& out,
@@ -2165,15 +2322,24 @@ void NativeFunctionRegistry::initBuiltins() {
     registerBuiltin("array", [](const std::vector<std::string>& args,
                                  std::vector<Instruction>& out,
                                  PixelblazeCompiler& compiler) {
-        for (const auto& arg : args) {
-            if (!compiler.compileAssignExpr(PixelblazeCompiler::trim(arg), out, true)) {
+        if (args.size() == 1) {
+            if (!compiler.compileAssignExpr(PixelblazeCompiler::trim(args[0]), out, true)) {
                 compiler.parseError();
                 return;
             }
+            std::string arr_name = "__arr_decl_" + std::to_string(compiler.arr_lit_counter_++);
+            out.push_back(Instruction::arrayDecl(arr_name));
+        } else {
+            for (const auto& arg : args) {
+                if (!compiler.compileAssignExpr(PixelblazeCompiler::trim(arg), out, true)) {
+                    compiler.parseError();
+                    return;
+                }
+            }
+            out.push_back(Instruction::push(static_cast<double>(args.size())));
+            std::string arr_name = "__arr_lit_" + std::to_string(compiler.arr_lit_counter_++);
+            out.push_back(Instruction::arrayLiteral(arr_name));
         }
-        out.push_back(Instruction::push(static_cast<double>(args.size())));
-        std::string arr_name = "__arr_lit_" + std::to_string(compiler.arr_lit_counter_++);
-        out.push_back(Instruction::arrayLiteral(arr_name));
     });
 }
 }

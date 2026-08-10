@@ -5,7 +5,7 @@
 
 namespace pixelblaze_cpp {
 
-//#define ENABLE_DUMP 0
+#define ENABLE_DUMP 0
 
 typedef enum : uint8_t {
     PBZ_LOG_LEVEL_DEBUG = 0,

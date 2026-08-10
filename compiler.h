@@ -117,10 +117,10 @@ class PixelblazeCompiler {
 public:
     Program compile(const std::string& source) const;
     bool parse_ok() const { return parse_ok_; }
+    std::string error_context() const { return error_context_; }
+    bool validateProgram(const Program& program) const;
 
 private:
-    void parseError() const { parse_ok_ = false; }
-
     void stripComments(std::string& source) const;
 
     void compileTopLevel(std::string source, Program& program) const;
@@ -155,6 +155,7 @@ private:
     static bool matchKeywordAt(const std::string& s, std::size_t pos, const char* kw);
     static std::size_t findStatementEnd(const std::string& s, std::size_t start);
     static std::size_t findBodyEnd(const std::string& s, std::size_t pos, bool stop_at_else);
+    static bool isArrayTempName(const std::string& name);
 
     static void compileArgs(const std::vector<std::string>& args,
                             std::vector<Instruction>& out,
@@ -166,6 +167,12 @@ private:
 
     mutable bool parse_ok_ = true;
     mutable int arr_lit_counter_ = 0;
+    mutable std::string error_context_;
+
+    void parseError() const {
+        parse_ok_ = false;
+        PBZ_ERROR("Parse error at: %s", error_context_.c_str());
+    }
 };
 
 }  // namespace pixelblaze_cpp

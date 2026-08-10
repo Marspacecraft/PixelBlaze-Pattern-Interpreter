@@ -1,13 +1,13 @@
-var speed = 0.2
-export var hueShift = 0
+// 最小数组测试
+buf = array(pixelCount)
 
-function beforeRender(delta) {
-  t = time(0.1 * speed)
+export function beforeRender(delta) {
+  for(var i=0;i<pixelCount;i++){
+    buf[i] = i / pixelCount + time(0.2)
+  }
 }
 
-function render(index) {
-  h = t + index/pixelCount + hueShift
-  s = 1
-  v = 1
-  hsv(h, s, v)
+export function render(index) {
+  var v = buf[index]
+  hsv(v,1,v)
 }

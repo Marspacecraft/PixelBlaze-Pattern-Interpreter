@@ -85,6 +85,7 @@ protected:
 	
     void setVar(const std::string& name, double value);
     double getVar(const std::string& name) const;
+    bool hasVar(const std::string& name) const;
     void declVar(const std::string& name);
 
 private:
@@ -131,6 +132,7 @@ private:
     std::map<std::string, double> exports_;
 
     std::map<std::string, std::vector<double>> arrays_;
+    std::vector<std::string> array_id_to_name_;
     std::map<double, std::string> string_consts_;
 
     double string_id_counter_ = 0.0;

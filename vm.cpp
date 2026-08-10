@@ -219,16 +219,6 @@ void VM::callFunction(const std::string& name, const std::vector<double>& args) 
     }
 
     run();
-
-    if (!locals_.empty()) locals_.pop_back();
-    if (!call_frames_.empty()) {
-        CallFrame frame = std::move(call_frames_.back());
-        call_frames_.pop_back();
-        code_ = std::move(frame.code);
-        ip_ = frame.ip;
-        stack_ = std::move(frame.stack);
-        return_stack_ = std::move(frame.return_stack);
-    }
 }
 
 void VM::beforeRender(double delta_ms) {
@@ -284,30 +274,44 @@ void VM::declVar(const std::string& name) {
 }
 
 void VM::setVar(const std::string& name, double value) {
+    double old_value = 0.0;
+    bool had_old = false;
+    if (hasVar(name)) {
+        old_value = getVar(name);
+        had_old = true;
+    }
+
     auto& reg = NativeFunctionRegistry::instance();
     if (reg.hasVariable(name)) {
         NativeValue v(value);
         reg.setVariableValue(name, v);
-        return;
-    }
-    if (reg.hasDynamicVariable(name)) {
+    } else if (reg.hasDynamicVariable(name)) {
         NativeValue v(value);
         setDynamicVarValue(name, v);
-        return;
-    }
-    if (!locals_.empty()) {
-        auto lit = locals_.back().find(name);
-        if (lit != locals_.back().end()) {
-            locals_.back()[name] = value;
-            return;
+    } else {
+        // Check if this is a global variable (declared at top level)
+        // Global variables should always be set in globals_, even when inside a function
+        auto git = globals_.find(name);
+        if (git != globals_.end()) {
+            globals_[name] = value;
+        } else if (!locals_.empty()) {
+            auto lit = locals_.back().find(name);
+            if (lit != locals_.back().end()) {
+                // Variable exists in current local scope — update it
+                lit->second = value;
+            } else {
+                // Not in locals either — treat as implicit global (Pixelblaze behavior:
+                // undeclared assignments create globals, so t = time(speed) works without var t)
+                globals_[name] = value;
+            }
+        } else {
+            globals_[name] = value;
         }
     }
-    auto it = globals_.find(name);
-    if (it != globals_.end()) {
-        globals_[name] = value;
-        return;
-    }
-    globals_[name] = value;
+
+    // Array cleanup is disabled for now - it was incorrectly deleting arrays that are still referenced
+    // The issue is that variables initialized to 0.0 (from DeclVar) are being confused with array ID 0
+    // if (had_old && old_value != value) { ... }
 }
 
 double VM::getVar(const std::string& name) const {
@@ -316,17 +320,32 @@ double VM::getVar(const std::string& name) const {
         NativeValue v = reg.getVariableValue(name);
         return v.dval;
     }
+    // Check globals first for variables that were declared at top level
+    auto it = globals_.find(name);
+    if (it != globals_.end()) return it->second;
+    // Then check locals
     if (!locals_.empty()) {
         auto it = locals_.back().find(name);
         if (it != locals_.back().end()) return it->second;
     }
-    auto it = globals_.find(name);
-    if (it != globals_.end()) return it->second;
     if (reg.hasDynamicVariable(name)) {
         NativeValue v = getDynamicVarValue(name);
         return v.dval;
     }
     return 0.0;
+}
+
+bool VM::hasVar(const std::string& name) const {
+    auto& reg = NativeFunctionRegistry::instance();
+    if (reg.hasVariable(name)) return true;
+    if (!locals_.empty()) {
+        auto it = locals_.back().find(name);
+        if (it != locals_.back().end()) return true;
+    }
+    auto it = globals_.find(name);
+    if (it != globals_.end()) return true;
+    if (reg.hasDynamicVariable(name)) return true;
+    return false;
 }
 
 void VM::pushStack(double v) {
@@ -373,6 +392,32 @@ void VM::run() {
 }
 
 void VM::executeInstruction(const Instruction& instr) {
+    auto resolveArray = [&](const std::string& name) -> std::pair<std::string, std::vector<double>*> {
+        if (hasVar(name)) {
+            double arr_id = getVar(name);
+            std::size_t id = static_cast<std::size_t>(arr_id);
+            if (id < array_id_to_name_.size()) {
+                const std::string& mapped = array_id_to_name_[id];
+                auto it2 = arrays_.find(mapped);
+                if (it2 != arrays_.end()) {
+                    return {mapped, &it2->second};
+                }
+            }
+        }
+        auto it = arrays_.find(name);
+        if (it != arrays_.end()) return {name, &it->second};
+        if (!hasVar(name)) {
+            double arr_id = getVar(name);
+            std::size_t id = static_cast<std::size_t>(arr_id);
+            if (id < array_id_to_name_.size()) {
+                const std::string& mapped = array_id_to_name_[id];
+                auto it2 = arrays_.find(mapped);
+                if (it2 != arrays_.end()) return {mapped, &it2->second};
+            }
+        }
+        return {"", nullptr};
+    };
+
     switch (instr.op) {
         case Op::Push:
             pushStack(static_cast<double>(instr.value));
@@ -435,7 +480,9 @@ void VM::executeInstruction(const Instruction& instr) {
         case Op::Mod: {
             double b = popStack();
             double a = popStack();
-            pushStack(b != 0.0 ? std::fmod(a, b) : 0.0);
+            double result = b != 0.0 ? std::fmod(a, b) : 0.0;
+            if (result < 0.0) result += b;
+            pushStack(result);
             ++ip_;
             break;
         }
@@ -490,6 +537,15 @@ void VM::executeInstruction(const Instruction& instr) {
         case Op::Not: {
             double a = popStack();
             pushStack(a == 0.0 ? 1.0 : 0.0);
+            ++ip_;
+            break;
+        }
+        case Op::BitNot: {
+            double a = popStack();
+            // JavaScript ~x = -(x+1) using integer semantics
+            // For the common toggle idiom: ~0 = -1 (truthy), ~(-1) = 0 (falsy)
+            std::int64_t ai = static_cast<std::int64_t>(a);
+            pushStack(static_cast<double>(~ai));
             ++ip_;
             break;
         }
@@ -747,6 +803,43 @@ void VM::executeInstruction(const Instruction& instr) {
             ++ip_;
             break;
         }
+        case Op::Exp: {
+            double a = popStack();
+            pushStack(std::exp(a));
+            ++ip_;
+            break;
+        }
+        case Op::Ln: {
+            double a = popStack();
+            pushStack(a > 0 ? std::log(a) : 0.0);
+            ++ip_;
+            break;
+        }
+        case Op::Log10: {
+            double a = popStack();
+            pushStack(a > 0 ? std::log10(a) : 0.0);
+            ++ip_;
+            break;
+        }
+        case Op::Log2: {
+            double a = popStack();
+            pushStack(a > 0 ? std::log2(a) : 0.0);
+            ++ip_;
+            break;
+        }
+        case Op::Atan2: {
+            double y = popStack();
+            double x = popStack();
+            pushStack(std::atan2(y, x));
+            ++ip_;
+            break;
+        }
+        case Op::Sign: {
+            double a = popStack();
+            pushStack(a > 0 ? 1.0 : (a < 0 ? -1.0 : 0.0));
+            ++ip_;
+            break;
+        }
         case Op::Rgb: {
             double b = popStack();
             double g = popStack();
@@ -947,9 +1040,26 @@ void VM::executeInstruction(const Instruction& instr) {
             ++ip_;
             break;
         }
+        case Op::Smoothstep: {
+            double t = popStack();
+            double edge1 = popStack();
+            double edge0 = popStack();
+            double x = (edge1 - edge0) != 0.0 ? (t - edge0) / (edge1 - edge0) : 0.0;
+            if (x < 0.0) x = 0.0;
+            if (x > 1.0) x = 1.0;
+            pushStack(x * x * (3.0 - 2.0 * x));
+            ++ip_;
+            break;
+        }
         case Op::Floor: {
             double a = popStack();
             pushStack(std::floor(a));
+            ++ip_;
+            break;
+        }
+        case Op::Frac: {
+            double a = popStack();
+            pushStack(a - std::floor(a));
             ++ip_;
             break;
         }
@@ -1042,22 +1152,24 @@ void VM::executeInstruction(const Instruction& instr) {
             ++ip_;
             break;
         }
+
         case Op::ArrayGet: {
             double idx = popStack();
-            auto it = arrays_.find(instr.name);
-            if (it == arrays_.end()) {
-                PBZ_ERROR("ArrayGet: array '%s' not found", instr.name.c_str());
+            std::string name = instr.name;
+            auto [resolved_name, arr_ptr] = resolveArray(name);
+            if (!arr_ptr) {
+                PBZ_ERROR("ArrayGet: array '%s' not found", name.c_str());
                 pushStack(0.0);
                 ++ip_;
                 break;
             }
             std::size_t i = static_cast<std::size_t>(idx);
-            if (i >= it->second.size()) {
+            if (i >= arr_ptr->size()) {
                 PBZ_ERROR("ArrayGet: index %zu out of bounds for array '%s' (size=%zu)",
-                          i, instr.name.c_str(), it->second.size());
+                          i, resolved_name.c_str(), arr_ptr->size());
                 pushStack(0.0);
             } else {
-                pushStack(it->second[i]);
+                pushStack((*arr_ptr)[i]);
             }
             ++ip_;
             break;
@@ -1065,20 +1177,59 @@ void VM::executeInstruction(const Instruction& instr) {
         case Op::ArraySet: {
             double idx = popStack();
             double val = popStack();
-            auto& arr = arrays_[instr.name];
-            std::size_t i = static_cast<std::size_t>(idx);
-            if (i >= arr.size()) {
-                PBZ_ERROR("ArraySet: index %zu out of bounds for array '%s' (size=%zu), resizing",
-                          i, instr.name.c_str(), arr.size());
-                arr.resize(i + 1, 0.0);
+            std::string name = instr.name;
+            auto [resolved_name, arr_ptr] = resolveArray(name);
+            if (!arr_ptr) {
+                PBZ_ERROR("ArraySet: array '%s' not found", name.c_str());
+                ++ip_;
+                break;
             }
-            arr[i] = val;
+            std::size_t i = static_cast<std::size_t>(idx);
+            if (i >= arr_ptr->size()) {
+                PBZ_ERROR("ArraySet: index %zu out of bounds for array '%s' (size=%zu), resizing",
+                          i, resolved_name.c_str(), arr_ptr->size());
+                arr_ptr->resize(i + 1, 0.0);
+            }
+            (*arr_ptr)[i] = val;
             ++ip_;
             break;
         }
         case Op::ArrayDecl: {
+            if (stack_.empty()) {
+                PBZ_ERROR("ArrayDecl '%s': stack empty!", instr.name.c_str());
+                pushStack(0.0);
+                ++ip_;
+                break;
+            }
             double size = popStack();
-            arrays_[instr.name].assign(static_cast<std::size_t>(size), 0.0);
+
+            // Check if this array name already exists (e.g., from a previous call to the same function)
+            auto it = arrays_.find(instr.name);
+            if (it != arrays_.end()) {
+                // Array already exists, resize it and push the existing ID
+                it->second.assign(static_cast<std::size_t>(size), 0.0);
+                // Find the existing ID
+                double existing_id = -1.0;
+                for (std::size_t i = 0; i < array_id_to_name_.size(); ++i) {
+                    if (array_id_to_name_[i] == instr.name) {
+                        existing_id = static_cast<double>(i);
+                        break;
+                    }
+                }
+                if (existing_id < 0) {
+                    // Should not happen, but handle it gracefully
+                    existing_id = static_cast<double>(array_id_to_name_.size());
+                    array_id_to_name_.push_back(instr.name);
+                }
+                pushStack(existing_id);
+            } else {
+                // Create new array
+                auto& arr = arrays_[instr.name];
+                arr.assign(static_cast<std::size_t>(size), 0.0);
+                double arr_id = static_cast<double>(array_id_to_name_.size());
+                array_id_to_name_.push_back(instr.name);
+                pushStack(arr_id);
+            }
             ++ip_;
             break;
         }
@@ -1086,10 +1237,38 @@ void VM::executeInstruction(const Instruction& instr) {
             double count = popStack();
             std::size_t n = static_cast<std::size_t>(count);
             std::string name = instr.name;
-            auto& arr = arrays_[name];
-            arr.resize(n, 0.0);
-            for (std::size_t i = 0; i < n && !stack_.empty(); ++i) {
-                arr[n - 1 - i] = popStack();
+            
+            // Check if this array name already exists
+            auto it = arrays_.find(name);
+            if (it != arrays_.end()) {
+                // Array already exists, reuse it
+                it->second.resize(n, 0.0);
+                for (std::size_t i = 0; i < n && !stack_.empty(); ++i) {
+                    it->second[n - 1 - i] = popStack();
+                }
+                // Find the existing ID
+                double existing_id = -1.0;
+                for (std::size_t i = 0; i < array_id_to_name_.size(); ++i) {
+                    if (array_id_to_name_[i] == name) {
+                        existing_id = static_cast<double>(i);
+                        break;
+                    }
+                }
+                if (existing_id < 0) {
+                    existing_id = static_cast<double>(array_id_to_name_.size());
+                    array_id_to_name_.push_back(name);
+                }
+                pushStack(existing_id);
+            } else {
+                // Create new array
+                auto& arr = arrays_[name];
+                arr.resize(n, 0.0);
+                for (std::size_t i = 0; i < n && !stack_.empty(); ++i) {
+                    arr[n - 1 - i] = popStack();
+                }
+                double arr_id = static_cast<double>(array_id_to_name_.size());
+                array_id_to_name_.push_back(name);
+                pushStack(arr_id);
             }
             ++ip_;
             break;

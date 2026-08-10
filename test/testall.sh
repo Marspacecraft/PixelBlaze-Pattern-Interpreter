@@ -3,6 +3,7 @@
 total=0
 pass=0
 fail=0
+failed_scripts=()
 
 echo "开始批量测试..."
 echo "=============================="
@@ -19,10 +20,19 @@ for jsfile in *.js; do
         ((pass++))
     else
         echo "❌ FAIL: $jsfile"
+        failed_scripts+=("$jsfile")
         ((fail++))
     fi
 done
 
 echo
+if [ ${#failed_scripts[@]} -gt 0 ]; then
+    echo "=============================="
+    echo "失败的脚本:"
+    for f in "${failed_scripts[@]}"; do
+        echo "  - $f"
+    done
+    echo
+fi
 echo "=============================="
 echo "测试汇总: 总计 $total, 通过 $pass, 失败 $fail"
