@@ -406,15 +406,6 @@ void VM::executeInstruction(const Instruction& instr) {
         }
         auto it = arrays_.find(name);
         if (it != arrays_.end()) return {name, &it->second};
-        if (!hasVar(name)) {
-            double arr_id = getVar(name);
-            std::size_t id = static_cast<std::size_t>(arr_id);
-            if (id < array_id_to_name_.size()) {
-                const std::string& mapped = array_id_to_name_[id];
-                auto it2 = arrays_.find(mapped);
-                if (it2 != arrays_.end()) return {mapped, &it2->second};
-            }
-        }
         return {"", nullptr};
     };
 
