@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
-#include <sstream>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -21,6 +20,8 @@ std::mt19937& rng() {
 }
 
 double rand_double(double lo, double hi) {
+    if (lo == hi) return lo;  // Avoid uniform_real_distribution assertion on degenerate range
+    if (lo > hi) std::swap(lo, hi);
     std::uniform_real_distribution<double> dist(lo, hi);
     return dist(rng());
 }
@@ -226,6 +227,8 @@ void VM::beforeRender(double delta_ms) {
     delta_ms_ = delta_ms;
     if (!before_render_name_.empty()) {
         callFunction(before_render_name_, {delta_ms});
+        // Pop the return value to prevent stack accumulation
+        if (!stack_.empty()) popStack();
     }
 }
 
@@ -250,6 +253,8 @@ void VM::renderPixel(std::size_t pixel_index) {
         }
     }
     onPixelColor(pixel_index_, current_color_);
+    // Pop the return value to prevent stack accumulation
+    if (!stack_.empty()) popStack();
 }
 
 // void VM::setExportVar(const std::string& name, double value) {
@@ -274,13 +279,6 @@ void VM::declVar(const std::string& name) {
 }
 
 void VM::setVar(const std::string& name, double value) {
-    double old_value = 0.0;
-    bool had_old = false;
-    if (hasVar(name)) {
-        old_value = getVar(name);
-        had_old = true;
-    }
-
     auto& reg = NativeFunctionRegistry::instance();
     if (reg.hasVariable(name)) {
         NativeValue v(value);
@@ -289,22 +287,25 @@ void VM::setVar(const std::string& name, double value) {
         NativeValue v(value);
         setDynamicVarValue(name, v);
     } else {
-        // Check if this is a global variable (declared at top level)
-        // Global variables should always be set in globals_, even when inside a function
-        auto git = globals_.find(name);
-        if (git != globals_.end()) {
-            globals_[name] = value;
-        } else if (!locals_.empty()) {
+        // Check locals first (mirrors getVar's read precedence within function scope)
+        if (!locals_.empty()) {
             auto lit = locals_.back().find(name);
             if (lit != locals_.back().end()) {
                 // Variable exists in current local scope — update it
                 lit->second = value;
-            } else {
-                // Not in locals either — treat as implicit global (Pixelblaze behavior:
-                // undeclared assignments create globals, so t = time(speed) works without var t)
-                globals_[name] = value;
+                return;
             }
+        }
+        // Check globals next
+        auto git = globals_.find(name);
+        if (git != globals_.end()) {
+            globals_[name] = value;
+        } else if (!locals_.empty()) {
+            // Not in locals but we're in a function scope — implicit global (Pixelblaze behavior:
+            // undeclared assignments create globals, so t = time(speed) works without var t)
+            globals_[name] = value;
         } else {
+            // Top-level, not in globals — create global
             globals_[name] = value;
         }
     }
@@ -471,8 +472,9 @@ void VM::executeInstruction(const Instruction& instr) {
         case Op::Mod: {
             double b = popStack();
             double a = popStack();
+            // JavaScript/C-style fmod: result has same sign as dividend (a)
+            // This matches PixelBlaze's JavaScript-like syntax
             double result = b != 0.0 ? std::fmod(a, b) : 0.0;
-            if (result < 0.0) result += b;
             pushStack(result);
             ++ip_;
             break;
@@ -740,8 +742,12 @@ void VM::executeInstruction(const Instruction& instr) {
             if (speed <= 0.0) {
                 pushStack(0.0);
             } else {
-                double t = std::fmod(time_ms_, 3600000.0);
-                pushStack(std::fmod(t / (speed * 65536.0), 1.0));
+                // In PixelBlaze, time(speed) returns a value cycling from 0→1.
+                // The formula is: fmod(time_ms / (speed * 65536), 1)
+                // where speed=1 gives a period of 65536ms (~65.5 seconds)
+                // and smaller speed values give shorter periods.
+                // Removed the 1-hour cap (3600000ms) which was truncating slow-speed cycles.
+                pushStack(std::fmod(time_ms_ / (speed * 65536.0), 1.0));
             }
             ++ip_;
             break;
@@ -847,6 +853,7 @@ void VM::executeInstruction(const Instruction& instr) {
             double s = popStack();
             double h = popStack();
             double hue = std::fmod(h, 1.0);
+            if (hue < 0.0) hue += 1.0;  // Normalize to [0, 1)
             double c = v * s;
             double x = c * (1.0 - std::fabs(std::fmod(hue * 6.0, 2.0) - 1.0));
             double m = v - c;
@@ -869,6 +876,7 @@ void VM::executeInstruction(const Instruction& instr) {
             double s = popStack();
             double h = popStack();
             double hue = std::fmod(h, 1.0);
+            if (hue < 0.0) hue += 1.0;  // Normalize to [0, 1)
             double sat = std::max(0.0, std::min(1.0, s));
             double light = std::max(0.0, std::min(1.0, l));
             double c = (1.0 - std::fabs(2.0 * light - 1.0)) * sat;
@@ -889,9 +897,12 @@ void VM::executeInstruction(const Instruction& instr) {
             break;
         }
         case Op::Log: {
+            // Pop only the number of arguments specified by instr.index
+            int argc = instr.index;
             std::vector<double> params;
-            params.reserve(stack_.size());
-            while (!stack_.empty()) {
+            params.reserve(argc > 0 ? argc : 1);
+            int to_pop = (argc > 0) ? argc : static_cast<int>(stack_.size());
+            for (int i = 0; i < to_pop && !stack_.empty(); ++i) {
                 params.push_back(stack_.back());
                 stack_.pop_back();
             }

@@ -1,13 +1,53 @@
 #!/usr/bin/env python3
 """
 Pixelblaze 双帧对比播放器（垂直排列）
-用法: python compare_player.py <文件1.json> <文件2.json>
+用法: python play_diff.py <文件1.json> <文件2.json>
 """
 
 import json
 import sys
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog
+
+def _get_cjk_font():
+    """返回一个支持中文的字体名称。优先直接尝试候选名，再从 families() 中搜索。"""
+    candidates = [
+        "Noto Sans CJK SC", "Noto Sans CJK", "Noto Sans CJK TC", "Noto Sans CJK JP",
+        "Noto Sans SC", "Noto Sans TC",
+        "Source Han Sans SC", "Source Han Sans CN", "Source Han Sans",
+        "WenQuanYi Micro Hei", "WenQuanYi Zen Hei", "WenQuanYi",
+        "Noto Sans CJK S Chinese", "Noto Sans S Chinese",
+        "Microsoft YaHei", "SimHei", "SimSun",
+        "PingFang SC", "Hiragino Sans GB",
+        "AR PL UMing CN", "AR PL UKai CN",
+        "Songti SC", "Heiti SC",
+    ]
+    for name in candidates:
+        try:
+            f = tkfont.Font(family=name, size=10)
+            actual = f.cget("family")
+            if actual and actual != "TkDefaultFont":
+                return name
+        except Exception:
+            pass
+
+    families = sorted(tkfont.families())
+    for name in families:
+        lower = name.lower()
+        if any(k in lower for k in ["noto sans cjk", "noto sans sc", "wenquanyi",
+                                     "source han", "microsoft yahei", "simhei",
+                                     "pingfang", "hiragino sans gb", "uming"]):
+            return name
+    for name in families:
+        lower = name.lower()
+        if any(k in lower for k in ["cjk", "chinese", "han", "songti", "heiti"]):
+            return name
+
+    print("警告: 未找到支持中文的字体，界面上的中文可能显示为乱码。")
+    print("如果已安装 fonts-noto-cjk，请运行: sudo fc-cache -fv")
+    print("否则请安装: sudo apt install fonts-noto-cjk")
+    return "TkDefaultFont"
 
 class ComparePlayer:
     def __init__(self, master, data1, data2, name1="文件1", name2="文件2"):
@@ -17,7 +57,6 @@ class ComparePlayer:
         self.pixel_count1 = data1.get("pixelCount", len(self.frames1[0]) if self.frames1 else 0)
         self.pixel_count2 = data2.get("pixelCount", len(self.frames2[0]) if self.frames2 else 0)
 
-        # 帧数对齐
         self.frame_count = min(len(self.frames1), len(self.frames2))
         if len(self.frames1) != len(self.frames2):
             print(f"警告: 帧数不同 ({len(self.frames1)} vs {len(self.frames2)})，将使用较小值 {self.frame_count}")
@@ -28,6 +67,11 @@ class ComparePlayer:
         self.running = False
         self.after_id = None
         self.fps = 30
+
+        cjk_font = _get_cjk_font()
+        style = ttk.Style()
+        style.configure(".", font=(cjk_font, 10))
+        style.configure("TLabelframe.Label", font=(cjk_font, 10, "bold"))
 
         master.title("Pixelblaze 双帧对比播放器（垂直）")
         master.resizable(False, False)
@@ -177,7 +221,7 @@ class ComparePlayer:
 
 def main():
     if len(sys.argv) < 3:
-        print("用法: python compare_player.py <文件1.json> <文件2.json>")
+        print("用法: python play_diff.py <文件1.json> <文件2.json>")
         print("也可以不带参数，通过对话框选择文件")
         root_temp = tk.Tk()
         root_temp.withdraw()
@@ -191,9 +235,9 @@ def main():
         file1, file2 = sys.argv[1], sys.argv[2]
 
     try:
-        with open(file1, 'r') as f:
+        with open(file1, 'r', encoding='utf-8') as f:
             data1 = json.load(f)
-        with open(file2, 'r') as f:
+        with open(file2, 'r', encoding='utf-8') as f:
             data2 = json.load(f)
     except Exception as e:
         print(f"读取文件失败: {e}")

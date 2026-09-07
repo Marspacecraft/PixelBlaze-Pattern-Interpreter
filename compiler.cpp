@@ -6,8 +6,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <set>
-#include <sstream>
-#include <stdexcept>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -80,8 +78,12 @@ bool PixelblazeCompiler::matchKeywordAt(const std::string& s, std::size_t pos, c
     return true;
 }
 
-std::string PixelblazeCompiler::findMatchingBrace(const std::string& s, std::size_t open_pos) {
-    if (open_pos >= s.size() || s[open_pos] != '{') {
+// Common bracket-matching helper: finds the content between an opening bracket
+// and its matching closing bracket. Returns the content string (excluding the brackets).
+// open_ch and close_ch specify the bracket pair (e.g. '{'/'}', '('/')', '['/']').
+std::string PixelblazeCompiler::findMatchingBracket(const std::string& s, std::size_t open_pos,
+                                                     char open_ch, char close_ch) {
+    if (open_pos >= s.size() || s[open_pos] != open_ch) {
         return std::string();
     }
     int depth = 1;
@@ -96,9 +98,9 @@ std::string PixelblazeCompiler::findMatchingBrace(const std::string& s, std::siz
             continue;
         }
         if (s[i] == '"' || s[i] == '\'') { in_str = true; str_ch = s[i]; ++i; continue; }
-        if (s[i] == '{') {
+        if (s[i] == open_ch) {
             ++depth;
-        } else if (s[i] == '}') {
+        } else if (s[i] == close_ch) {
             --depth;
         }
         if (depth == 0) {
@@ -109,31 +111,12 @@ std::string PixelblazeCompiler::findMatchingBrace(const std::string& s, std::siz
     return "";
 }
 
+std::string PixelblazeCompiler::findMatchingBrace(const std::string& s, std::size_t open_pos) {
+    return findMatchingBracket(s, open_pos, '{', '}');
+}
+
 std::string PixelblazeCompiler::findMatchingParen(const std::string& s, std::size_t open_pos) {
-    if (open_pos >= s.size() || s[open_pos] != '(') return "";
-    int depth = 1;
-    std::size_t i = open_pos + 1;
-    bool in_str = false;
-    char str_ch = 0;
-    while (i < s.size() && depth > 0) {
-        if (in_str) {
-            if (s[i] == '\\' && i + 1 < s.size()) { i += 2; continue; }
-            if (s[i] == str_ch) { in_str = false; str_ch = 0; }
-            ++i;
-            continue;
-        }
-        if (s[i] == '"' || s[i] == '\'') { in_str = true; str_ch = s[i]; ++i; continue; }
-        if (s[i] == '(') {
-            ++depth;
-        } else if (s[i] == ')') {
-            --depth;
-        }
-        if (depth == 0) {
-            return s.substr(open_pos + 1, i - open_pos - 1);
-        }
-        ++i;
-    }
-    return "";
+    return findMatchingBracket(s, open_pos, '(', ')');
 }
 
 std::vector<std::string> PixelblazeCompiler::splitTopLevelArgs(const std::string& s) {
@@ -407,6 +390,11 @@ Program PixelblazeCompiler::compile(const std::string& source) const {
     compileTopLevel(std::move(src), program);
 
     if (parse_ok_) {
+        // 优化：消除冗余指令（peephole optimization）
+        optimizeProgram(program);
+    }
+
+    if (parse_ok_) {
         // 验证程序中所有函数调用和变量引用都有定义
         validateProgram(program);
     }
@@ -422,6 +410,97 @@ Program PixelblazeCompiler::compile(const std::string& source) const {
     program.dump();
 #endif
     return program;
+}
+
+// Peephole optimizer: eliminates redundant instruction sequences
+// Patterns optimized:
+//   dup -> pop         : removed entirely (push value was discarded)
+//   pop -> push N      : replaced with push N (reorder)
+//   swap -> pop        : removed (top value discarded, swap was wasted)
+//   setVar X -> getVar X : replaced with dup -> setVar X (save stack value for expression result)
+void PixelblazeCompiler::optimizeProgram(Program& program) const {
+    auto optimize = [&](std::vector<Instruction>& code) {
+        if (code.size() < 2) return;
+
+        std::vector<Instruction> out;
+        out.reserve(code.size());
+
+        for (std::size_t i = 0; i < code.size(); ++i) {
+            const auto& curr = code[i];
+            // Look ahead one instruction for optimization opportunities
+            if (i + 1 < code.size()) {
+                const auto& next = code[i + 1];
+
+                // Pattern: dup -> pop (value pushed then immediately discarded)
+                // Remove both instructions
+                if (curr.op == Op::Dup && next.op == Op::Pop) {
+                    ++i;  // Skip next too
+                    continue;
+                }
+
+                // Pattern: swap -> pop (swap then discard top)
+                // Replace with just pop (the value that was on top is gone, swap was useless)
+                if (curr.op == Op::Swap && next.op == Op::Pop) {
+                    out.push_back(Instruction::pop());
+                    ++i;
+                    continue;
+                }
+
+                // Pattern: pop followed by push -> reorder to push then pop
+                // This happens when an expression result is discarded before a new value
+                if (curr.op == Op::Pop && next.op == Op::Push) {
+                    out.push_back(next);  // push first
+                    out.push_back(curr);  // pop after
+                    ++i;
+                    continue;
+                }
+            }
+
+            out.push_back(curr);
+        }
+
+        // Second pass: eliminate dead code (push followed by pop with no intervening use)
+        std::vector<Instruction> final_code;
+        final_code.reserve(out.size());
+        int push_depth = 0;  // track pushes that haven't been consumed
+
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            const auto& instr = out[i];
+
+            if (instr.op == Op::Push || instr.op == Op::PushString ||
+                instr.op == Op::GetVar || instr.op == Op::ArrayGet) {
+                ++push_depth;
+                final_code.push_back(instr);
+            } else if (instr.op == Op::Pop) {
+                if (push_depth > 0) {
+                    // Remove the preceding push + this pop
+                    final_code.pop_back();
+                    --push_depth;
+                } else {
+                    final_code.push_back(instr);
+                }
+            } else if (instr.op == Op::Dup) {
+                ++push_depth;
+                final_code.push_back(instr);
+            } else if (instr.op == Op::Swap) {
+                final_code.push_back(instr);
+            } else if (instr.op == Op::Rot) {
+                final_code.push_back(instr);
+            } else {
+                // Most ops consume their operands - reset depth tracking
+                // (conservative: don't try to track exact stack usage)
+                push_depth = 0;
+                final_code.push_back(instr);
+            }
+        }
+
+        code = std::move(final_code);
+    };
+
+    optimize(program.main_code);
+    for (auto& [name, fn] : program.functions) {
+        optimize(fn.code);
+    }
 }
 
 bool PixelblazeCompiler::validateProgram(const Program& program) const {
@@ -1233,74 +1312,54 @@ void PixelblazeCompiler::compileIdentExpr(const std::string& ident, std::vector<
 void PixelblazeCompiler::emitBuiltin(const std::string& name, const std::vector<std::string>& args,
                                      std::vector<Instruction>& out) const {
     auto& reg = NativeFunctionRegistry::instance();
+
+    // Local helper: validate argument types
+    auto checkTypes = [this](const std::vector<std::string>& a,
+                             const std::vector<NativeValueType>& types) -> bool {
+        if (a.size() != types.size()) { parseError(); return false; }
+        for (std::size_t i = 0; i < a.size() && i < types.size(); ++i) {
+            const std::string& arg = trim(a[i]);
+            NativeValueType expected = types[i];
+            bool is_str_lit = (!arg.empty() && (arg.front() == '"' || arg.front() == '\''));
+            bool is_num_lit = false;
+            if (!arg.empty() && !is_str_lit) {
+                char c = arg[0];
+                is_num_lit = std::isdigit(static_cast<unsigned char>(c)) ||
+                             (c == '.' && arg.size() > 1 &&
+                              std::isdigit(static_cast<unsigned char>(arg[1])));
+            }
+            if (is_str_lit && expected != NativeValueType::String) { parseError(); return false; }
+            if (is_num_lit && expected != NativeValueType::Double) { parseError(); return false; }
+        }
+        return true;
+    };
+
+    // Local helper: compile args and emit call
+    auto doCall = [this, &args, &out, &checkTypes](const std::string& fn, const NativeFunctionInfo* info,
+                                       bool is_native) {
+        if (info && info->hasTypeInfo) {
+            if (!checkTypes(args, info->paramTypes)) return;
+        }
+        compileArgs(args, out, *const_cast<PixelblazeCompiler*>(this));
+        if (is_native) {
+            out.push_back(Instruction::callNative(fn, static_cast<int>(args.size())));
+        } else {
+            out.push_back(Instruction::call(fn));
+            out.back().index = static_cast<int>(args.size());
+        }
+    };
+
     auto it = reg.builtins().find(name);
     if (it != reg.builtins().end()) {
         it->second(args, out, *const_cast<PixelblazeCompiler*>(this));
         return;
     }
     if (reg.hasFunction(name)) {
-        const auto* info = reg.getFunctionInfo(name);
-        if (info && info->hasTypeInfo) {
-            if (args.size() != info->paramTypes.size()) {
-                parseError();
-                return;
-            }
-            for (std::size_t i = 0; i < args.size() && i < info->paramTypes.size(); ++i) {
-                const std::string& arg = trim(args[i]);
-                NativeValueType expected = info->paramTypes[i];
-                bool is_str_lit = (!arg.empty() && (arg.front() == '"' || arg.front() == '\''));
-                bool is_num_lit = false;
-                if (!arg.empty() && !is_str_lit) {
-                    char c = arg[0];
-                    is_num_lit = std::isdigit(static_cast<unsigned char>(c)) ||
-                                 (c == '.' && arg.size() > 1 &&
-                                  std::isdigit(static_cast<unsigned char>(arg[1])));
-                }
-                if (is_str_lit && expected != NativeValueType::String) {
-                    parseError();
-                    return;
-                }
-                if (is_num_lit && expected != NativeValueType::Double) {
-                    parseError();
-                    return;
-                }
-            }
-        }
-        compileArgs(args, out, *const_cast<PixelblazeCompiler*>(this));
-        out.push_back(Instruction::callNative(name, static_cast<int>(args.size())));
+        doCall(name, reg.getFunctionInfo(name), true);
         return;
     }
     if (reg.hasDynamicFunction(name)) {
-        const auto* info = reg.getDynamicFunctionInfo(name);
-        if (info && info->hasTypeInfo) {
-            if (args.size() != info->paramTypes.size()) {
-                parseError();
-                return;
-            }
-            for (std::size_t i = 0; i < args.size() && i < info->paramTypes.size(); ++i) {
-                const std::string& arg = trim(args[i]);
-                NativeValueType expected = info->paramTypes[i];
-                bool is_str_lit = (!arg.empty() && (arg.front() == '"' || arg.front() == '\''));
-                bool is_num_lit = false;
-                if (!arg.empty() && !is_str_lit) {
-                    char c = arg[0];
-                    is_num_lit = std::isdigit(static_cast<unsigned char>(c)) ||
-                                 (c == '.' && arg.size() > 1 &&
-                                  std::isdigit(static_cast<unsigned char>(arg[1])));
-                }
-                if (is_str_lit && expected != NativeValueType::String) {
-                    parseError();
-                    return;
-                }
-                if (is_num_lit && expected != NativeValueType::Double) {
-                    parseError();
-                    return;
-                }
-            }
-        }
-        compileArgs(args, out, *const_cast<PixelblazeCompiler*>(this));
-        out.push_back(Instruction::call(name));
-        out.back().index = static_cast<int>(args.size());
+        doCall(name, reg.getDynamicFunctionInfo(name), false);
         return;
     }
     // 未知函数：假设是用户定义的函数，生成 Call 指令
@@ -1865,10 +1924,10 @@ bool PixelblazeCompiler::compileAssignExpr(const std::string& expr, std::vector<
         if (c == '(' || c == '{' || c == '[') ++depth;
         else if (c == ')' || c == '}' || c == ']') --depth;
         else if (depth == 0) {
-            // Skip == and != comparison operators
+            // Skip ==, !=, <=, >= comparison operators
             if (c == '=' && (i + 1 >= part.size() || part[i + 1] != '=')) {
-                // Also check that previous char is not '!' (for !=)
-                if (i == 0 || part[i - 1] != '!') {
+                // Also check that previous char is not '!', '<', or '>' (for !=, <=, >=)
+                if (i == 0 || (part[i - 1] != '!' && part[i - 1] != '<' && part[i - 1] != '>')) {
                     asg.pos = i;
                     asg.op = '=';
                     has_assign = true;
@@ -2197,7 +2256,19 @@ void NativeFunctionRegistry::initBuiltins() {
     registerBuiltinOp("rgb", Op::Rgb);
     registerBuiltinOp("hsv", Op::Hsv);
     registerBuiltinOp("okhsl", Op::Okhsl);
-    registerBuiltinOp("log", Op::Log, {"console_log"});
+    // log() is special: the VM needs to know how many args to pop from the stack.
+    // Use a custom handler that records argc in instr.index.
+    {
+        auto log_handler = [](const std::vector<std::string>& args,
+                              std::vector<Instruction>& out,
+                              PixelblazeCompiler& compiler) {
+            PixelblazeCompiler::compileArgs(args, out, compiler);
+            out.push_back(Instruction::makeOp(Op::Log));
+            out.back().index = static_cast<int>(args.size());
+        };
+        registerBuiltin("log", log_handler);
+        registerBuiltin("console_log", log_handler);
+    }
     registerBuiltinOp("min", Op::Min);
     registerBuiltinOp("max", Op::Max);
     registerBuiltinOp("clamp", Op::Clamp);
@@ -2228,9 +2299,16 @@ void NativeFunctionRegistry::initBuiltins() {
                               std::vector<Instruction>& out,
                               PixelblazeCompiler& compiler) {
         if (args.empty()) {
+            // random() → [0, 1)
             out.push_back(Instruction::makeOp(Op::Random));
+        } else if (args.size() == 1) {
+            // random(n) → [0, n)
+            out.push_back(Instruction::push(0.0));  // lo = 0
+            PixelblazeCompiler::compileArgs(args, out, compiler);  // hi = n
+            out.push_back(Instruction::makeOp(Op::RandomRange));
         } else {
-            PixelblazeCompiler::compileArgs(args, out, compiler);
+            // random(lo, hi) → [lo, hi)
+            PixelblazeCompiler::compileArgs(args, out, compiler);  // lo, hi
             out.push_back(Instruction::makeOp(Op::RandomRange));
         }
     };

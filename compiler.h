@@ -111,6 +111,9 @@ private:
     std::unordered_map<std::string, BuiltinHandler> builtin_registry_;
 };
 
+struct NativeFunctionInfo;
+struct NativeVariableInfo;
+
 class PixelblazeCompiler {
     friend class NativeFunctionRegistry;
 
@@ -121,6 +124,7 @@ public:
     bool validateProgram(const Program& program) const;
 
 private:
+    void optimizeProgram(Program& program) const;
     void stripComments(std::string& source) const;
 
     void compileTopLevel(std::string source, Program& program) const;
@@ -149,6 +153,8 @@ private:
     static bool isIdentStart(char c);
     static std::string toLower(std::string s);
     static std::string trim(const std::string& s);
+    static std::string findMatchingBracket(const std::string& s, std::size_t open_pos,
+                                           char open_ch, char close_ch);
     static std::string findMatchingBrace(const std::string& s, std::size_t open_pos);
     static std::string findMatchingParen(const std::string& s, std::size_t open_pos);
     static std::vector<std::string> splitTopLevelArgs(const std::string& s);
