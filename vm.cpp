@@ -78,7 +78,7 @@ VM::VM(std::size_t count) : ip_(0), has_color_(false), time_ms_(0.0), delta_ms_(
            pixel_index_(0), pixel_count_(static_cast<double>(count)) {}
 
 void VM::deinit() {
- 
+
     code_.clear();
     ip_ = 0;
     stack_.clear();
@@ -98,6 +98,8 @@ void VM::deinit() {
     pixel_index_ = 0;
 
     arrays_.clear();
+    array_id_to_name_.clear();
+    exports_.clear();
     string_consts_.clear();
     string_id_counter_ = 0.0;
 
@@ -151,7 +153,25 @@ void VM::loadProgram(const Program& program) {
         }
     }
 
-    run();
+    // Execute main code for variable/array declarations
+    // On embedded targets, we run main code once at load time
+    #if defined(ARDUINO) || defined(ESP32)
+        // Execute main code with a limited step count for declarations only
+        std::size_t max_init_steps = 10000;
+        std::size_t steps = 0;
+        while (ip_ < code_.size() && steps < max_init_steps) {
+            executeInstruction(code_[ip_]);
+            if (ip_ >= code_.size()) break;
+            ++steps;
+        }
+        if (ip_ < code_.size()) {
+            PBZ_WARN("Main code execution truncated at ip=%zu", ip_);
+        }
+        // Reset for next loadProgram
+        ip_ = 0;
+    #else
+        run();
+    #endif
 
     #if ENABLE_DUMP
         dump();
@@ -1186,13 +1206,99 @@ void VM::executeInstruction(const Instruction& instr) {
                 ++ip_;
                 break;
             }
+            // Defensive check: reject negative indices
+            if (idx < 0) {
+                PBZ_ERROR("ArraySet: negative index %.0f for array '%s'", idx, resolved_name.c_str());
+                ++ip_;
+                break;
+            }
             std::size_t i = static_cast<std::size_t>(idx);
+            // Defensive limit: prevent massive reallocations
+            if (i > 65536) {
+                PBZ_ERROR("ArraySet: index %zu too large for array '%s'", i, resolved_name.c_str());
+                ++ip_;
+                break;
+            }
             if (i >= arr_ptr->size()) {
                 PBZ_ERROR("ArraySet: index %zu out of bounds for array '%s' (size=%zu), resizing",
                           i, resolved_name.c_str(), arr_ptr->size());
                 arr_ptr->resize(i + 1, 0.0);
             }
             (*arr_ptr)[i] = val;
+            ++ip_;
+            break;
+        }
+        case Op::ArrayGetById: {
+            // Stack: [array_id, index] → pops both, pushes array[index]
+            double idx = popStack();
+            double arr_id = popStack();
+            std::size_t id = static_cast<std::size_t>(arr_id);
+            if (id >= array_id_to_name_.size()) {
+                PBZ_ERROR("ArrayGetById: array id %zu out of range (max=%zu)", id, array_id_to_name_.size());
+                pushStack(0.0);
+                ++ip_;
+                break;
+            }
+            const std::string& arr_name = array_id_to_name_[id];
+            auto it = arrays_.find(arr_name);
+            if (it == arrays_.end()) {
+                PBZ_ERROR("ArrayGetById: array '%s' (id=%zu) not found", arr_name.c_str(), id);
+                pushStack(0.0);
+                ++ip_;
+                break;
+            }
+            std::size_t i = static_cast<std::size_t>(idx);
+            if (idx < 0 || i > 65536) {
+                PBZ_ERROR("ArrayGetById: invalid index %.0f for array '%s'", idx, arr_name.c_str());
+                pushStack(0.0);
+                ++ip_;
+                break;
+            }
+            if (i >= it->second.size()) {
+                PBZ_ERROR("ArrayGetById: index %zu out of bounds for array '%s' (size=%zu)",
+                          i, arr_name.c_str(), it->second.size());
+                pushStack(0.0);
+            } else {
+                pushStack(it->second[i]);
+            }
+            ++ip_;
+            break;
+        }
+        case Op::ArraySetById: {
+            // Stack: [array_id, index, value] → pops all, sets array[index] = value
+            double val = popStack();
+            double idx = popStack();
+            double arr_id = popStack();
+            std::size_t id = static_cast<std::size_t>(arr_id);
+            if (id >= array_id_to_name_.size()) {
+                PBZ_ERROR("ArraySetById: array id %zu out of range (max=%zu)", id, array_id_to_name_.size());
+                ++ip_;
+                break;
+            }
+            const std::string& arr_name = array_id_to_name_[id];
+            auto it = arrays_.find(arr_name);
+            if (it == arrays_.end()) {
+                PBZ_ERROR("ArraySetById: array '%s' (id=%zu) not found", arr_name.c_str(), id);
+                ++ip_;
+                break;
+            }
+            if (idx < 0) {
+                PBZ_ERROR("ArraySetById: negative index %.0f for array '%s'", idx, arr_name.c_str());
+                ++ip_;
+                break;
+            }
+            std::size_t i = static_cast<std::size_t>(idx);
+            if (i > 65536) {
+                PBZ_ERROR("ArraySetById: index %zu too large for array '%s'", i, arr_name.c_str());
+                ++ip_;
+                break;
+            }
+            if (i >= it->second.size()) {
+                PBZ_ERROR("ArraySetById: index %zu out of bounds for array '%s' (size=%zu), resizing",
+                          i, arr_name.c_str(), it->second.size());
+                it->second.resize(i + 1, 0.0);
+            }
+            it->second[i] = val;
             ++ip_;
             break;
         }
@@ -1204,6 +1310,15 @@ void VM::executeInstruction(const Instruction& instr) {
                 break;
             }
             double size = popStack();
+
+            // Defensive check: reject negative or unreasonably large sizes
+            // This prevents heap corruption from invalid size values
+            if (size < 0 || size > 65536) {
+                PBZ_ERROR("ArrayDecl '%s': invalid size %.0f (must be 0-65536)", instr.name.c_str(), size);
+                pushStack(0.0);
+                ++ip_;
+                break;
+            }
 
             // Check if this array name already exists (e.g., from a previous call to the same function)
             auto it = arrays_.find(instr.name);

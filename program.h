@@ -100,6 +100,8 @@ enum class Op {
     ArraySet,
     ArrayDecl,
     ArrayLiteral,
+    ArrayGetById,
+    ArraySetById,
     PushString,
 };
 const char* opToString(Op op);

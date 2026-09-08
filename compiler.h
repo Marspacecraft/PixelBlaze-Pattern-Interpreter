@@ -171,6 +171,14 @@ private:
                      std::vector<Instruction>& out) const;
     void compileIdentExpr(const std::string& ident, std::vector<Instruction>& out) const;
 
+    // Parse array target: "arr[i][j]" → name="arr", indices=["i", "j"]
+    bool parseArrayTarget(const std::string& target, std::string& base_name,
+                          std::vector<std::string>& indices) const;
+    // Compile nested array set: arr[i][j] = value
+    bool compileNestedArraySet(const std::string& base_name, const std::vector<std::string>& indices,
+                               const std::string& value, std::vector<Instruction>& out,
+                               bool as_expression, bool compound_op) const;
+
     mutable bool parse_ok_ = true;
     mutable int arr_lit_counter_ = 0;
     mutable std::string error_context_;

@@ -87,6 +87,8 @@ const char* opToString(Op op) {
         case Op::ArraySet: return "ArraySet";
         case Op::ArrayDecl: return "ArrayDecl";
         case Op::ArrayLiteral: return "ArrayLiteral";
+        case Op::ArrayGetById: return "ArrayGetById";
+        case Op::ArraySetById: return "ArraySetById";
         case Op::PushString: return "PushString";
     }
     return "Unknown";
